@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Manpower OCR — Form → Excel</title>
+
+<!-- Tailwind (Play CDN) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- Tesseract.js (browser OCR) -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
+<!-- ExcelJS (browser Excel writing) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<!-- pdf.js (first page of PDF -> image) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<style>
+  body { background:#f6f7fb; color:#1f2433; }
+  .card { background:#fff; border:1px solid #e2e8f0; border-radius:1rem; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; border-radius:.75rem; padding:.6rem 1rem; font-weight:500; transition:.15s; cursor:pointer; }
+  .btn-primary { background:#364fc7; color:#fff; }
+  .btn-primary:hover { background:#2f44ad; }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-ghost { background:#f1f5f9; color:#334155; }
+  .btn-ghost:hover { background:#e2e8f0; }
+  .hidden { display:none; }
+  input.cell { width:5rem; }
+  .scroll { max-height:60vh; overflow:auto; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<header class="border-b border-slate-200 bg-white">
+  <div class="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between">
+    <span class="font-bold text-lg text-indigo-800">📋 Manpower OCR</span>
+    <nav class="flex gap-4 text-sm">
+      <button data-tab="app" class="tab-btn hover:text-indigo-700 font-medium">App</button>
+      <button data-tab="admin" class="tab-btn hover:text-indigo-700 text-slate-500">Admin / Mapping</button>
+    </nav>
+  </div>
+</header>
+
+<main class="mx-auto max-w-6xl px-4 py-8">
+
+  <!-- ===================== APP TAB ===================== -->
+  <section id="tab-app">
+    <!-- Stepper -->
+    <ol id="stepper" class="flex items-center justify-center gap-3 mb-8 text-sm"></ol>
+
+    <!-- STEP 1: UPLOAD -->
+    <div id="step-upload">
+      <h1 class="text-2xl font-bold mb-1">Upload the manpower report</h1>
+      <p class="text-slate-500 mb-6">Drop a photo/scan of the form, attach your blank Excel template, then extract. Everything runs in your browser — nothing is uploaded to a server.</p>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div id="dropzone" class="card p-8 flex flex-col items-center justify-center text-center border-dashed border-2 cursor-pointer min-h-[240px]">
+          <div class="text-4xl mb-3">⬆️</div>
+          <p class="font-medium">Drag &amp; drop form image</p>
+          <p class="text-sm text-slate-400 mb-3">or</p>
+          <span class="btn-ghost">Browse file</span>
+          <p class="text-xs text-slate-400 mt-3">PNG · JPG · JPEG · PDF</p>
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,application/pdf" class="hidden" />
+        </div>
+        <div class="card p-4 min-h-[240px] flex items-center justify-center">
+          <img id="preview" alt="preview" class="max-h-[380px] rounded-lg hidden" />
+          <p id="previewHint" class="text-slate-400 text-sm">Image preview appears here</p>
+        </div>
+      </div>
+
+      <div class="card p-4 mt-4 flex items-center gap-4 flex-wrap">
+        <div>
+          <p class="font-medium text-sm">Excel template (.xlsx)</p>
+          <p class="text-xs text-slate-400">Your blank form layout. Values get written into it; formatting is preserved.</p>
+        </div>
+        <input id="templateInput" type="file" accept=".xlsx" class="text-sm" />
+        <span id="templateStatus" class="text-xs text-slate-400"></span>
+      </div>
+
+      <p id="uploadError" class="text-red-600 mt-4 text-sm"></p>
+
+      <div id="progressWrap" class="mt-6 hidden">
+        <div class="flex justify-between text-sm mb-1"><span id="progressLabel">Extracting…</span><span id="progressPct">0%</span></div>
+        <div class="h-2 bg-slate-200 rounded-full overflow-hidden"><div id="progressBar" class="h-full bg-indigo-700 transition-all" style="width:0%"></div></div>
+      </div>
+
+      <div class="mt-6">
+        <button id="extractBtn" class="btn btn-primary" disabled>Extract values →</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: REVIEW -->
+    <div id="step-review" class="hidden">
+      <div class="flex items-start justify-between gap-4 mb-6">
+        <div>
+          <h1 class="text-2xl font-bold mb-1">Review extracted values</h1>
+          <p id="reviewSummary" class="text-slate-500"></p>
+        </div>
+        <button id="generateBtn" class="btn btn-primary shrink-0">Generate Excel →</button>
+      </div>
+      <div class="grid lg:grid-cols-[1fr,300px] gap-6">
+        <div id="reviewTables" class="space-y-8"></div>
+        <aside class="hidden lg:block">
+          <div class="card p-3 sticky top-4">
+            <p class="text-xs text-slate-400 mb-2">Source image</p>
+            <img id="reviewImage" class="rounded-lg w-full" />
+          </div>
+        </aside>
+      </div>
+      <button id="backToUpload" class="btn btn-ghost mt-6">← Back</button>
+    </div>
+
+    <!-- STEP 3: DOWNLOAD -->
+    <div id="step-download" class="hidden">
+      <div class="card p-10 text-center max-w-xl mx-auto">
+        <div id="dlIcon" class="text-4xl mb-3">✅</div>
+        <h1 id="dlTitle" class="text-xl font-bold mb-1">Your file is ready</h1>
+        <p id="dlName" class="text-slate-500 mb-6"></p>
+        <a id="dlLink" class="btn btn-primary" download>⬇️ Download Excel</a>
+        <p id="dlError" class="text-red-600 mt-4 text-sm"></p>
+        <div class="mt-6"><button id="resetBtn" class="btn btn-ghost">Process another form</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== ADMIN TAB ===================== -->
+  <section id="tab-admin" class="hidden">
+    <h1 class="text-2xl font-bold mb-1">Admin · field → cell mapping</h1>
+    <p class="text-slate-500 mb-4">Override the target Excel cell for any field to match your real template. Saved in this browser and applied on export.</p>
+    <div class="flex gap-3 mb-4">
+      <button id="saveMapping" class="btn btn-primary">Save mapping</button>
+      <button id="resetMapping" class="btn btn-ghost">Reset to defaults</button>
+      <span id="mappingMsg" class="text-sm text-green-600 self-center"></span>
+    </div>
+    <div id="adminTables" class="space-y-6"></div>
+  </section>
+
+</main>
+
+<footer class="mx-auto max-w-6xl px-4 py-8 text-center text-xs text-slate-400">
+  Static template-based OCR · Tesseract.js + ExcelJS · runs 100% in your browser
+</footer>
+
+<script>
+/* ============================================================================
+   1) MAPPING — describe the fixed form once, derive every field + Excel cell.
+   Regions are fractions (0..1) of the image so any resolution works.
+   ============================================================================ */
+const X_TOTAL = [0.86, 0.985];
+const DATA_LEFT = 0.40, DATA_RIGHT = 0.86, N_DATA = 6;
+const COL_W = (DATA_RIGHT - DATA_LEFT) / N_DATA;
+const EXCEL_COLS = ["A","B","C","D","E","F","G","H"];
+const dataBand = i => [DATA_LEFT + i*COL_W, DATA_LEFT + (i+1)*COL_W];
+
+function columns(headers){
+  const cols = headers.map((key,i)=>({ key, band:dataBand(i), excelCol:EXCEL_COLS[i+1] }));
+  cols.push({ key:"Total", band:X_TOTAL, excelCol:"H" });
+  return cols;
+}
+const slug = s => s.replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"");
+
+const SECTIONS = [
+  { section:"A", title:"Direct Manpower", yTop:0.105, yBottom:0.285,
+    cols: columns(["Ist","Gen","10:00","IInd","19:00","IIIrd"]),
+    rows: ["STAFF","WORKMAN","INPLANT TRAINEE","INTERNSHIP","APP-ITI","VIP-NAPS","NAPS-DISTIL","NATS-DISTIL","VIP-NATS","BSA-NAPS","SAIPRASAD NAPS","SKILL RESOURCES DEVELOPMENT"]
+      .map((label,i)=>({label, excelRow:5+i})) },
+  { section:"B1", title:"Indirect Manpower", yTop:0.32, yBottom:0.39,
+    cols: columns(["Ist","Gen","MID","IInd","XX","IIIrd"]),
+    rows: ["IAAS-GUARD BOARD","IAAS-GMS","IAAS-GARDEN","GOLDAN (HOUSEKEEPING)","BHADRA CATERERS-CANTEEN","SAI KRUPA (BSR)"]
+      .map((label,i)=>({label, excelRow:19+i})) },
+  { section:"B2", title:"Piece Rate", yTop:0.43, yBottom:0.69,
+    cols: columns(["Ist","Gen","MID","IInd","XX","XXX"]),
+    rows: ["AARYAN LOCK","SHREE LA FG SHIFTING","HUNDEKAR","SHREE RAM ENT","NANDAN ENT","CHAMUNDA ENT","MAITY IND","NILESH ENT","MATHADI - STORE","MATHADI - BSR","MATHADI - CASUAL","APEKSHA TRANSPORT","RAJU KATARE","VED SERVICES (T)","SUBHADRA TRANSPORT"]
+      .map((label,i)=>({label, excelRow:28+i})) },
+  { section:"C", title:"Factory in Factory", yTop:0.754, yBottom:0.945,
+    cols: columns(["LINE 1","LINE 2","LINE 3","LINE 4","LINE 5","LINE 6"]),
+    rows: ["SWAMINI ENT (3 LINE)","SUBHADRA ENT (3 LINE)","SRI SAI ENT (2 LINE)","WARDHAN ENT (2 LINE)","SHREE GAJANAN (2 LINE)","PRATIK SERVICES (3 LINE)","ARYAN ENT (2 LINE)","GENIUS ENT","SHREE ENT (1 LINE)","A.S. ENT","VED TRANSPORT"]
+      .map((label,i)=>({label, excelRow:45+i})) },
+];
+
+function buildMapping(){
+  const fields = [];
+  fields.push({ id:"HDR.DATE", section:"HDR", sectionTitle:"Header", rowLabel:"Report Date",
+    column:"Date", excelCell:"H2", region:{x:0.6,y:0.058,w:0.3,h:0.025}, numeric:false });
+  for(const sec of SECTIONS){
+    const n = sec.rows.length, rowH = (sec.yBottom - sec.yTop)/n;
+    sec.rows.forEach((row,ri)=>{
+      const yTop = sec.yTop + ri*rowH;
+      for(const col of sec.cols){
+        fields.push({
+          id:`${sec.section}.${slug(row.label)}.${slug(col.key)}`,
+          section:sec.section, sectionTitle:sec.title, rowLabel:row.label, column:col.key,
+          excelCell:`${col.excelCol}${row.excelRow}`,
+          region:{ x:col.band[0], y:yTop, w:col.band[1]-col.band[0], h:rowH },
+          numeric:true
+        });
+      }
+    });
+  }
+  return fields;
+}
+const DEFAULT_MAPPING = buildMapping();
+
+/* admin overrides (localStorage) */
+const OV_KEY = "mpr.cellOverrides";
+const getOverrides = () => JSON.parse(localStorage.getItem(OV_KEY) || "{}");
+const saveOverrides = o => localStorage.setItem(OV_KEY, JSON.stringify(o));
+function mappingWithOverrides(){
+  const ov = getOverrides();
+  return DEFAULT_MAPPING.map(f => ov[f.id] ? {...f, excelCell:ov[f.id]} : f);
+}
+
+/* ============================================================================
+   2) PREPROCESSING — grayscale, contrast, denoise, deskew, crop (canvas).
+   ============================================================================ */
+function loadImage(src){ return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=src; }); }
+function makeCanvas(w,h){ const c=document.createElement("canvas"); c.width=w; c.height=h; return c; }
+const clamp = v => v<0?0:v>255?255:v;
+
+function applyFilters(canvas, opts){
+  const ctx = canvas.getContext("2d");
+  const {width:w, height:h} = canvas;
+  const img = ctx.getImageData(0,0,w,h), d = img.data;
+  const c = (opts.contrast ?? 25)/100;
+  const factor = (1.015*(c+1))/(1.0*(1.015-c));
+  for(let i=0;i<d.length;i+=4){
+    let r=d[i],g=d[i+1],b=d[i+2];
+    if(opts.grayscale!==false){ const gr=0.299*r+0.587*g+0.114*b; r=g=b=gr; }
+    r=factor*(r-128)+128; g=factor*(g-128)+128; b=factor*(b-128)+128;
+    if(opts.binarize){ const v=r<145?0:255; r=g=b=v; }
+    d[i]=clamp(r); d[i+1]=clamp(g); d[i+2]=clamp(b);
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function estimateSkew(canvas){
+  const sw=Math.min(600,canvas.width), scale=sw/canvas.width, sh=Math.round(canvas.height*scale);
+  const small=makeCanvas(sw,sh); small.getContext("2d").drawImage(canvas,0,0,sw,sh);
+  const data=small.getContext("2d").getImageData(0,0,sw,sh).data;
+  const ink=new Uint8Array(sw*sh);
+  for(let i=0;i<sw*sh;i++) ink[i]=data[i*4]<140?1:0;
+  let bestA=0,bestS=-1;
+  for(let a=-4;a<=4;a+=0.5){
+    const tan=Math.tan(a*Math.PI/180); const rows=new Float64Array(sh);
+    for(let y=0;y<sh;y++){ let s=0; for(let x=0;x<sw;x++){ const sy=Math.round(y+(x-sw/2)*tan); if(sy>=0&&sy<sh) s+=ink[sy*sw+x]; } rows[y]=s; }
+    let mean=0; for(const v of rows) mean+=v; mean/=sh;
+    let varr=0; for(const v of rows) varr+=(v-mean)**2;
+    if(varr>bestS){ bestS=varr; bestA=a; }
+  }
+  return bestA;
+}
+function rotate(canvas,deg){
+  if(Math.abs(deg)<0.25) return canvas;
+  const rad=deg*Math.PI/180, {width:w,height:h}=canvas, out=makeCanvas(w,h), ctx=out.getContext("2d");
+  ctx.fillStyle="#fff"; ctx.fillRect(0,0,w,h);
+  ctx.translate(w/2,h/2); ctx.rotate(-rad); ctx.drawImage(canvas,-w/2,-h/2);
+  return out;
+}
+async function preprocess(src){
+  const img=await loadImage(src);
+  let canvas=makeCanvas(img.naturalWidth,img.naturalHeight);
+  canvas.getContext("2d").drawImage(img,0,0);
+  applyFilters(canvas,{grayscale:true,contrast:25});
+  canvas=rotate(canvas,estimateSkew(canvas));
+  return canvas;
+}
+function cropRegion(canvas,region,upscale=2){
+  const sx=Math.round(region.x*canvas.width), sy=Math.round(region.y*canvas.height);
+  const sw=Math.max(1,Math.round(region.w*canvas.width)), sh=Math.max(1,Math.round(region.h*canvas.height));
+  const out=makeCanvas(sw*upscale,sh*upscale), ctx=out.getContext("2d");
+  ctx.imageSmoothingEnabled=true;
+  ctx.drawImage(canvas,sx,sy,sw,sh,0,0,sw*upscale,sh*upscale);
+  applyFilters(out,{grayscale:true,contrast:35,binarize:true});
+  return out;
+}
+
+/* ============================================================================
+   3) OCR — per-region recognition with Tesseract.js
+   ============================================================================ */
+let _worker=null;
+async function getWorker(){
+  if(!_worker){ _worker = await Tesseract.createWorker("eng"); }
+  return _worker;
+}
+function cleanNumeric(raw){
+  let s=raw.replace(/[^0-9]/g,"");
+  if(s===""){ s=raw.replace(/[oO]/g,"0").replace(/[lI|]/g,"1").replace(/[sS]/g,"5").replace(/[bB]/g,"6").replace(/[^0-9]/g,""); }
+  return s;
+}
+async function extractAll(imageSrc, fields, onProgress){
+  const page=await preprocess(imageSrc);
+  const worker=await getWorker();
+  const results=[];
+  for(let i=0;i<fields.length;i++){
+    const f=fields[i];
+    const url=cropRegion(page,f.region,2).toDataURL("image/png");
+    await worker.setParameters({
+      tessedit_char_whitelist: f.numeric ? "0123456789" : "",
+      tessedit_pageseg_mode: "7" // single line
+    });
+    let value="",confidence=0;
+    try{ const {data}=await worker.recognize(url); confidence=Math.round(data.confidence||0);
+      value=f.numeric?cleanNumeric(data.text):data.text.trim(); }catch(e){ confidence=0; }
+    results.push({id:f.id,value,confidence,edited:false});
+    onProgress && onProgress(i+1,fields.length);
+  }
+  return results;
+}
+
+/* ============================================================================
+   4) EXCEL — fill the uploaded template in-browser with ExcelJS
+   ============================================================================ */
+async function fillTemplate(templateBuffer, cellValues){
+  const wb=new ExcelJS.Workbook();
+  await wb.xlsx.load(templateBuffer);
+  const ws=wb.worksheets[0];
+  for(const [addr,raw] of Object.entries(cellValues)){
+    if(raw===undefined||raw===null||raw==="") continue;
+    const cell=ws.getCell(addr);
+    const num=Number(raw);
+    cell.value=(!Number.isNaN(num) && /^[0-9]+(\.[0-9]+)?$/.test(String(raw).trim())) ? num : raw;
+  }
+  return await wb.xlsx.writeBuffer();
+}
+
+/* ============================================================================
+   5) UI CONTROLLER
+   ============================================================================ */
+const $=id=>document.getElementById(id);
+const state={ imageDataUrl:null, templateBuffer:null, fields:mappingWithOverrides(), values:{} };
+
+/* tabs */
+document.querySelectorAll(".tab-btn").forEach(b=>b.addEventListener("click",()=>{
+  const t=b.dataset.tab;
+  $("tab-app").classList.toggle("hidden",t!=="app");
+  $("tab-admin").classList.toggle("hidden",t!=="admin");
+  document.querySelectorAll(".tab-btn").forEach(x=>x.classList.toggle("text-slate-500",x!==b));
+  if(t==="admin") renderAdmin();
+}));
+
+/* stepper */
+function renderStepper(cur){
+  const steps=["Upload","Review","Download"];
+  $("stepper").innerHTML=steps.map((s,i)=>{
+    const active=i<=cur;
+    return `<li class="flex items-center gap-2">
+      <span class="flex h-7 w-7 items-center justify-center rounded-full font-semibold ${active?'bg-indigo-700 text-white':'bg-slate-200 text-slate-500'}">${i+1}</span>
+      <span class="${active?'font-medium':'text-slate-400'}">${s}</span>
+      ${i<2?'<span class="h-px w-8 bg-slate-300 ml-1"></span>':''}</li>`;
+  }).join("");
+}
+function showStep(step){
+  renderStepper(step==="upload"?0:step==="review"?1:2);
+  $("step-upload").classList.toggle("hidden",step!=="upload");
+  $("step-review").classList.toggle("hidden",step!=="review");
+  $("step-download").classList.toggle("hidden",step!=="download");
+}
+
+/* file readers */
+const readDataUrl=file=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);});
+const readBuffer=file=>file.arrayBuffer();
+
+async function pdfFirstPage(file){
+  pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  const page=await pdf.getPage(1), vp=page.getViewport({scale:2.5});
+  const c=makeCanvas(vp.width,vp.height);
+  await page.render({canvasContext:c.getContext("2d"),viewport:vp}).promise;
+  return c.toDataURL("image/png");
+}
+
+function checkReady(){ $("extractBtn").disabled = !(state.imageDataUrl && state.templateBuffer); }
+
+async function handleImage(file){
+  $("uploadError").textContent="";
+  try{
+    let url;
+    if(file.type==="application/pdf") url=await pdfFirstPage(file);
+    else if(/image\/(png|jpe?g)/.test(file.type)) url=await readDataUrl(file);
+    else { $("uploadError").textContent="Unsupported file. Use PNG, JPG, JPEG or PDF."; return; }
+    state.imageDataUrl=url;
+    $("preview").src=url; $("preview").classList.remove("hidden"); $("previewHint").classList.add("hidden");
+    checkReady();
+  }catch(e){ $("uploadError").textContent=e.message||"Could not read file"; }
+}
+
+/* dropzone */
+const dz=$("dropzone");
+dz.addEventListener("click",()=>$("imageInput").click());
+dz.addEventListener("dragover",e=>{e.preventDefault();dz.classList.add("border-indigo-400");});
+dz.addEventListener("dragleave",()=>dz.classList.remove("border-indigo-400"));
+dz.addEventListener("drop",e=>{e.preventDefault();dz.classList.remove("border-indigo-400");if(e.dataTransfer.files[0])handleImage(e.dataTransfer.files[0]);});
+$("imageInput").addEventListener("change",e=>e.target.files[0]&&handleImage(e.target.files[0]));
+
+$("templateInput").addEventListener("change",async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  state.templateBuffer=await readBuffer(f);
+  $("templateStatus").textContent="✓ "+f.name; $("templateStatus").className="text-xs text-green-600";
+  checkReady();
+});
+
+/* extract */
+$("extractBtn").addEventListener("click",async()=>{
+  state.fields=mappingWithOverrides();
+  $("progressWrap").classList.remove("hidden");
+  $("extractBtn").disabled=true; $("extractBtn").textContent="Reading…";
+  try{
+    const vals=await extractAll(state.imageDataUrl,state.fields,(done,total)=>{
+      const pct=Math.round(done/total*100);
+      $("progressPct").textContent=pct+"%"; $("progressBar").style.width=pct+"%";
+    });
+    state.values={}; vals.forEach(v=>state.values[v.id]=v);
+    renderReview(); showStep("review");
+  }catch(e){ $("uploadError").textContent=e.message||"OCR failed"; }
+  finally{ $("extractBtn").disabled=false; $("extractBtn").textContent="Extract values →"; $("progressWrap").classList.add("hidden"); }
+});
+
+/* review */
+function confClass(c){ return c>=80?"bg-green-100 text-green-700":c>=55?"bg-amber-100 text-amber-700":"bg-red-100 text-red-700"; }
+function renderReview(){
+  $("reviewImage").src=state.imageDataUrl;
+  const groups={};
+  state.fields.forEach(f=>(groups[f.sectionTitle]=groups[f.sectionTitle]||[]).push(f));
+  const filled=Object.values(state.values).filter(v=>v.value).length;
+  $("reviewSummary").textContent=`${filled} of ${state.fields.length} cells have values. Low-confidence cells are red — fix anything wrong.`;
+  $("reviewTables").innerHTML=Object.entries(groups).map(([title,fs])=>`
+    <div class="card overflow-hidden">
+      <div class="bg-slate-50 px-4 py-2 font-semibold border-b">${title}</div>
+      <div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead class="text-left text-slate-500 border-b"><tr>
+          <th class="px-4 py-2 font-medium">Field</th><th class="px-4 py-2 font-medium">Cell</th>
+          <th class="px-4 py-2 font-medium">Extracted</th><th class="px-4 py-2 font-medium">Value</th>
+          <th class="px-4 py-2 font-medium">Conf.</th></tr></thead>
+        <tbody>${fs.map(f=>{const v=state.values[f.id]||{value:"",confidence:0};return `
+          <tr class="border-b last:border-0 hover:bg-slate-50">
+            <td class="px-4 py-1.5">${f.rowLabel} <span class="text-slate-400">· ${f.column}</span></td>
+            <td class="px-4 py-1.5 text-slate-400">${f.excelCell}</td>
+            <td class="px-4 py-1.5 text-slate-500">${v.value||"—"}</td>
+            <td class="px-4 py-1.5"><input data-fid="${f.id}" value="${v.value||""}" inputmode="${f.numeric?'numeric':'text'}" class="rev-input w-24 rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500"/></td>
+            <td class="px-4 py-1.5"><span class="rounded-full px-2 py-0.5 text-xs ${confClass(v.confidence)}">${v.confidence}%</span></td>
+          </tr>`;}).join("")}</tbody>
+      </table></div>
+    </div>`).join("");
+  document.querySelectorAll(".rev-input").forEach(inp=>inp.addEventListener("input",e=>{
+    const id=e.target.dataset.fid;
+    state.values[id]={...(state.values[id]||{id,confidence:100}),value:e.target.value,edited:true};
+  }));
+}
+$("backToUpload").addEventListener("click",()=>showStep("upload"));
+
+/* generate */
+$("generateBtn").addEventListener("click",async()=>{
+  $("dlError").textContent="";
+  showStep("download"); $("dlTitle").textContent="Generating Excel…"; $("dlIcon").textContent="⏳"; $("dlLink").classList.add("hidden");
+  try{
+    const ov=getOverrides(), cellValues={};
+    state.fields.forEach(f=>{ const cell=ov[f.id]||f.excelCell; const v=state.values[f.id]; if(v&&v.value) cellValues[cell]=v.value; });
+    const buf=await fillTemplate(state.templateBuffer,cellValues);
+    const blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    const name=`Output_${new Date().toISOString().slice(0,10).replace(/-/g,"")}.xlsx`;
+    const link=$("dlLink"); link.href=URL.createObjectURL(blob); link.download=name; link.classList.remove("hidden");
+    $("dlTitle").textContent="Your file is ready"; $("dlIcon").textContent="✅"; $("dlName").textContent=name;
+  }catch(e){ $("dlIcon").textContent="⚠️"; $("dlTitle").textContent="Could not generate"; $("dlError").textContent=e.message||"Generation failed"; }
+});
+$("resetBtn").addEventListener("click",()=>{ state.imageDataUrl=null; state.values={}; $("preview").classList.add("hidden"); $("previewHint").classList.remove("hidden"); checkReady(); showStep("upload"); });
+
+/* admin */
+function renderAdmin(){
+  const ov=getOverrides(), groups={};
+  DEFAULT_MAPPING.forEach(f=>(groups[f.section]=groups[f.section]||[]).push(f));
+  $("adminTables").innerHTML=Object.entries(groups).map(([sec,fs])=>`
+    <div class="card overflow-hidden">
+      <div class="bg-slate-50 px-4 py-2 font-semibold border-b">Section ${sec} — ${fs[0].sectionTitle}</div>
+      <div class="overflow-x-auto scroll"><table class="w-full text-sm">
+        <thead class="text-left text-slate-500 border-b"><tr>
+          <th class="px-4 py-2 font-medium">Row</th><th class="px-4 py-2 font-medium">Column</th>
+          <th class="px-4 py-2 font-medium">Default</th><th class="px-4 py-2 font-medium">Override</th></tr></thead>
+        <tbody>${fs.map(f=>`
+          <tr class="border-b last:border-0">
+            <td class="px-4 py-1.5">${f.rowLabel}</td><td class="px-4 py-1.5 text-slate-500">${f.column}</td>
+            <td class="px-4 py-1.5 text-slate-400">${f.excelCell}</td>
+            <td class="px-4 py-1.5"><input data-fid="${f.id}" placeholder="${f.excelCell}" value="${ov[f.id]||""}" class="adm-input cell rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500 uppercase"/></td>
+          </tr>`).join("")}</tbody>
+      </table></div>
+    </div>`).join("");
+}
+$("saveMapping").addEventListener("click",()=>{
+  const ov={}; document.querySelectorAll(".adm-input").forEach(i=>{ if(i.value.trim()) ov[i.dataset.fid]=i.value.trim().toUpperCase(); });
+  saveOverrides(ov); state.fields=mappingWithOverrides();
+  $("mappingMsg").textContent="Saved ✓"; setTimeout(()=>$("mappingMsg").textContent="",2000);
+});
+$("resetMapping").addEventListener("click",()=>{ saveOverrides({}); state.fields=mappingWithOverrides(); renderAdmin(); $("mappingMsg").textContent="Reset ✓"; setTimeout(()=>$("mappingMsg").textContent="",2000); });
+
+/* init */
+showStep("upload");
+</script>
+</body>
+</html>
