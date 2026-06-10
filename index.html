@@ -88,6 +88,28 @@
       </div>
     </div>
 
+    <!-- STEP 1b: CALIBRATE -->
+    <div id="step-calibrate" class="hidden">
+      <h1 class="text-2xl font-bold mb-1">Align the grid to your form</h1>
+      <p class="text-slate-500 mb-4">Drag the four <span class="text-indigo-700 font-medium">blue dots</span> so the box hugs the outer border of the table in your photo. The <span class="text-amber-600 font-medium">yellow boxes</span> show exactly which pixels each cell will read — line them up over the handwritten numbers. This is saved for next time.</p>
+      <div id="calibWrap" class="card p-0 inline-block overflow-hidden select-none touch-none align-top">
+        <div class="relative inline-block">
+          <img id="calibImg" class="block max-h-[68vh] max-w-full" />
+          <div id="calibLayer" class="absolute inset-0"></div>
+        </div>
+      </div>
+      <div id="calibProgress" class="mt-4 hidden max-w-md">
+        <div class="flex justify-between text-sm mb-1"><span>Extracting…</span><span id="calibPct">0%</span></div>
+        <div class="h-2 bg-slate-200 rounded-full overflow-hidden"><div id="calibBar" class="h-full bg-indigo-700 transition-all" style="width:0%"></div></div>
+      </div>
+      <div class="mt-4 flex gap-3 items-center flex-wrap">
+        <button id="calibExtractBtn" class="btn btn-primary">Extract values →</button>
+        <button id="calibBack" class="btn btn-ghost">← Back</button>
+        <button id="calibReset" class="btn btn-ghost">Reset box</button>
+        <label class="text-sm self-center flex items-center gap-2"><input type="checkbox" id="showCells" checked/> show cell boxes</label>
+      </div>
+    </div>
+
     <!-- STEP 2: REVIEW -->
     <div id="step-review" class="hidden">
       <div class="flex items-start justify-between gap-4 mb-6">
@@ -209,6 +231,25 @@ function mappingWithOverrides(){
   return DEFAULT_MAPPING.map(f => ov[f.id] ? {...f, excelCell:ov[f.id]} : f);
 }
 
+/* ---- table calibration --------------------------------------------------
+   All region coords were measured against a reference photo whose table outer
+   border sits at REF_TABLE. The user marks where that border is in THEIR photo
+   (calRect); we remap every region from the reference box into their box, so
+   the crops line up regardless of margins/zoom/position. */
+const REF_TABLE = { x0:0.17, y0:0.085, x1:0.985, y1:0.955 };
+const CAL_KEY = "mpr.tableRect";
+const getTableRect = () => JSON.parse(localStorage.getItem(CAL_KEY) || "null") || {...REF_TABLE};
+const saveTableRect = r => localStorage.setItem(CAL_KEY, JSON.stringify(r));
+function calibrateFields(fields, rect){
+  const rw=REF_TABLE.x1-REF_TABLE.x0, rh=REF_TABLE.y1-REF_TABLE.y0;
+  const uw=rect.x1-rect.x0, uh=rect.y1-rect.y0;
+  return fields.map(f=>{
+    const u0=(f.region.x-REF_TABLE.x0)/rw, v0=(f.region.y-REF_TABLE.y0)/rh;
+    const u1=(f.region.x+f.region.w-REF_TABLE.x0)/rw, v1=(f.region.y+f.region.h-REF_TABLE.y0)/rh;
+    return {...f, region:{ x:rect.x0+u0*uw, y:rect.y0+v0*uh, w:(u1-u0)*uw, h:(v1-v0)*uh }};
+  });
+}
+
 /* ============================================================================
    2) PREPROCESSING — grayscale, contrast, denoise, deskew, crop (canvas).
    ============================================================================ */
@@ -257,10 +298,11 @@ function rotate(canvas,deg){
 }
 async function preprocess(src){
   const img=await loadImage(src);
-  let canvas=makeCanvas(img.naturalWidth,img.naturalHeight);
+  const canvas=makeCanvas(img.naturalWidth,img.naturalHeight);
   canvas.getContext("2d").drawImage(img,0,0);
+  // NOTE: no auto-rotate here — the user aligns the grid manually on the
+  // un-rotated image, so we must keep the same geometry for crops to match.
   applyFilters(canvas,{grayscale:true,contrast:25});
-  canvas=rotate(canvas,estimateSkew(canvas));
   return canvas;
 }
 function cropRegion(canvas,region,upscale=2){
@@ -300,7 +342,7 @@ async function extractAll(imageSrc, fields, onProgress){
     let value="",confidence=0;
     try{ const {data}=await worker.recognize(url); confidence=Math.round(data.confidence||0);
       value=f.numeric?cleanNumeric(data.text):data.text.trim(); }catch(e){ confidence=0; }
-    results.push({id:f.id,value,confidence,edited:false});
+    results.push({id:f.id,value,confidence,edited:false,crop:url});
     onProgress && onProgress(i+1,fields.length);
   }
   return results;
@@ -327,6 +369,7 @@ async function fillTemplate(templateBuffer, cellValues){
    ============================================================================ */
 const $=id=>document.getElementById(id);
 const state={ imageDataUrl:null, templateBuffer:null, fields:mappingWithOverrides(), values:{} };
+let calRect=null, calDragging=null;
 
 /* tabs */
 document.querySelectorAll(".tab-btn").forEach(b=>b.addEventListener("click",()=>{
@@ -349,8 +392,9 @@ function renderStepper(cur){
   }).join("");
 }
 function showStep(step){
-  renderStepper(step==="upload"?0:step==="review"?1:2);
+  renderStepper(step==="review"?1:step==="download"?2:0);
   $("step-upload").classList.toggle("hidden",step!=="upload");
+  $("step-calibrate").classList.toggle("hidden",step!=="calibrate");
   $("step-review").classList.toggle("hidden",step!=="review");
   $("step-download").classList.toggle("hidden",step!=="download");
 }
@@ -398,20 +442,61 @@ $("templateInput").addEventListener("change",async e=>{
   checkReady();
 });
 
-/* extract */
-$("extractBtn").addEventListener("click",async()=>{
-  state.fields=mappingWithOverrides();
-  $("progressWrap").classList.remove("hidden");
-  $("extractBtn").disabled=true; $("extractBtn").textContent="Reading…";
+/* upload -> calibrate */
+$("extractBtn").addEventListener("click",()=>{ showStep("calibrate"); renderCalib(); });
+
+/* ---- calibration view ---- */
+function handleDot(c,x,y){
+  return `<div data-corner="${c}" class="cal-h absolute w-5 h-5 -ml-2.5 -mt-2.5 rounded-full bg-indigo-600 border-2 border-white shadow cursor-grab" style="left:${x*100}%;top:${y*100}%"></div>`;
+}
+function drawCalib(){
+  if(!calRect) return;
+  const layer=$("calibLayer"), r=calRect, show=$("showCells").checked;
+  const fields=calibrateFields(mappingWithOverrides(),r);
+  const cells = show ? fields.map(f=>`<div class="absolute" style="left:${f.region.x*100}%;top:${f.region.y*100}%;width:${f.region.w*100}%;height:${f.region.h*100}%;border:1px solid rgba(245,158,11,.8);background:rgba(251,191,36,.12)"></div>`).join("") : "";
+  const boxStyle=`left:${r.x0*100}%;top:${r.y0*100}%;width:${(r.x1-r.x0)*100}%;height:${(r.y1-r.y0)*100}%`;
+  layer.innerHTML = cells +
+    `<div class="absolute border-2 border-indigo-500/80 pointer-events-none" style="${boxStyle}"></div>` +
+    handleDot("tl",r.x0,r.y0)+handleDot("tr",r.x1,r.y0)+handleDot("bl",r.x0,r.y1)+handleDot("br",r.x1,r.y1);
+  layer.querySelectorAll(".cal-h").forEach(h=>h.addEventListener("pointerdown",e=>{
+    e.preventDefault(); calDragging=h.dataset.corner;
+  }));
+}
+function renderCalib(){
+  calRect=getTableRect();
+  const img=$("calibImg");
+  img.onload=drawCalib; img.src=state.imageDataUrl;
+  if(img.complete && img.naturalWidth) drawCalib();
+}
+window.addEventListener("pointermove",e=>{
+  if(!calDragging||!calRect) return;
+  const box=$("calibImg").getBoundingClientRect();
+  let fx=(e.clientX-box.left)/box.width, fy=(e.clientY-box.top)/box.height;
+  fx=Math.max(0,Math.min(1,fx)); fy=Math.max(0,Math.min(1,fy));
+  if(calDragging.includes("l")) calRect.x0=fx; else calRect.x1=fx;
+  if(calDragging[0]==="t") calRect.y0=fy; else calRect.y1=fy;
+  drawCalib();
+});
+window.addEventListener("pointerup",()=>{ if(calDragging){ saveTableRect(calRect); calDragging=null; } });
+$("showCells").addEventListener("change",drawCalib);
+$("calibReset").addEventListener("click",()=>{ calRect={...REF_TABLE}; saveTableRect(calRect); drawCalib(); });
+$("calibBack").addEventListener("click",()=>showStep("upload"));
+
+/* calibrate -> extract */
+$("calibExtractBtn").addEventListener("click",async()=>{
+  const fields=calibrateFields(mappingWithOverrides(),calRect);
+  state.fields=fields;
+  $("calibProgress").classList.remove("hidden");
+  $("calibExtractBtn").disabled=true; $("calibExtractBtn").textContent="Reading…";
   try{
-    const vals=await extractAll(state.imageDataUrl,state.fields,(done,total)=>{
+    const vals=await extractAll(state.imageDataUrl,fields,(done,total)=>{
       const pct=Math.round(done/total*100);
-      $("progressPct").textContent=pct+"%"; $("progressBar").style.width=pct+"%";
+      $("calibPct").textContent=pct+"%"; $("calibBar").style.width=pct+"%";
     });
     state.values={}; vals.forEach(v=>state.values[v.id]=v);
     renderReview(); showStep("review");
-  }catch(e){ $("uploadError").textContent=e.message||"OCR failed"; }
-  finally{ $("extractBtn").disabled=false; $("extractBtn").textContent="Extract values →"; $("progressWrap").classList.add("hidden"); }
+  }catch(e){ alert(e.message||"OCR failed"); }
+  finally{ $("calibExtractBtn").disabled=false; $("calibExtractBtn").textContent="Extract values →"; $("calibProgress").classList.add("hidden"); }
 });
 
 /* review */
@@ -428,12 +513,14 @@ function renderReview(){
       <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead class="text-left text-slate-500 border-b"><tr>
           <th class="px-4 py-2 font-medium">Field</th><th class="px-4 py-2 font-medium">Cell</th>
-          <th class="px-4 py-2 font-medium">Extracted</th><th class="px-4 py-2 font-medium">Value</th>
+          <th class="px-4 py-2 font-medium">Crop</th>
+          <th class="px-4 py-2 font-medium">Read</th><th class="px-4 py-2 font-medium">Value</th>
           <th class="px-4 py-2 font-medium">Conf.</th></tr></thead>
         <tbody>${fs.map(f=>{const v=state.values[f.id]||{value:"",confidence:0};return `
           <tr class="border-b last:border-0 hover:bg-slate-50">
             <td class="px-4 py-1.5">${f.rowLabel} <span class="text-slate-400">· ${f.column}</span></td>
             <td class="px-4 py-1.5 text-slate-400">${f.excelCell}</td>
+            <td class="px-4 py-1.5">${v.crop?`<img src="${v.crop}" class="h-7 w-auto rounded border border-slate-200 bg-white"/>`:"—"}</td>
             <td class="px-4 py-1.5 text-slate-500">${v.value||"—"}</td>
             <td class="px-4 py-1.5"><input data-fid="${f.id}" value="${v.value||""}" inputmode="${f.numeric?'numeric':'text'}" class="rev-input w-24 rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500"/></td>
             <td class="px-4 py-1.5"><span class="rounded-full px-2 py-0.5 text-xs ${confClass(v.confidence)}">${v.confidence}%</span></td>
