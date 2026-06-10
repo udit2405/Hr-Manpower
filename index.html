@@ -223,12 +223,63 @@ function buildMapping(){
 const DEFAULT_MAPPING = buildMapping();
 
 /* admin overrides (localStorage) */
-const OV_KEY = "mpr.cellOverrides";
+const OV_KEY = "mpr.cellOverrides";   // manual overrides (Admin)
+const AUTO_KEY = "mpr.autoCells";     // cells auto-detected from the template
 const getOverrides = () => JSON.parse(localStorage.getItem(OV_KEY) || "{}");
 const saveOverrides = o => localStorage.setItem(OV_KEY, JSON.stringify(o));
+const getAuto = () => JSON.parse(localStorage.getItem(AUTO_KEY) || "{}");
+const saveAuto = o => localStorage.setItem(AUTO_KEY, JSON.stringify(o));
+/* effective cell = manual override > template-detected > built-in default */
+function effectiveCell(f){ const m=getOverrides(), a=getAuto(); return m[f.id]||a[f.id]||f.excelCell; }
 function mappingWithOverrides(){
-  const ov = getOverrides();
-  return DEFAULT_MAPPING.map(f => ov[f.id] ? {...f, excelCell:ov[f.id]} : f);
+  return DEFAULT_MAPPING.map(f => { const c=effectiveCell(f); return c!==f.excelCell?{...f,excelCell:c}:f; });
+}
+
+/* ---- auto-detect Excel cells FROM the uploaded template -------------------
+   Both files share the layout, so we read the template, locate each row by its
+   label text and each column by its header text, and build the cell map. This
+   replaces hardcoded guesses — values land in the same cell as the form. */
+function colLetter(c){ let s=""; while(c>0){ const m=(c-1)%26; s=String.fromCharCode(65+m)+s; c=Math.floor((c-1)/26);} return s; }
+async function autoMapFromTemplate(buffer){
+  const wb=new ExcelJS.Workbook(); await wb.xlsx.load(buffer);
+  const ws=wb.worksheets[0]; if(!ws) return {count:0,total:DEFAULT_MAPPING.length,cells:{}};
+  const norm=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+  const grid=[];
+  ws.eachRow({includeEmpty:false},(row,r)=>row.eachCell({includeEmpty:false},(cell,c)=>{
+    const t=norm(cell.text); if(t) grid.push({r,c,t});
+  }));
+
+  // columns: match header tokens (exact normalised equality is reliable here)
+  const tokenCandidates={
+    "Ist":["ist","1st"],"Gen":["gen"],"10:00":["1000"],"IInd":["iind","2nd"],
+    "19:00":["1900"],"IIIrd":["iiird","3rd"],"Total":["total"],"MID":["mid"],
+    "XX":["xx"],"XXX":["xxx"],"LINE 1":["line1"],"LINE 2":["line2"],"LINE 3":["line3"],
+    "LINE 4":["line4"],"LINE 5":["line5"],"LINE 6":["line6"],"Date":["date"]
+  };
+  const colForToken={};
+  for(const [key,cands] of Object.entries(tokenCandidates)){
+    const hit=grid.find(g=>cands.includes(g.t)); if(hit) colForToken[key]=hit.c;
+  }
+  const dataColMin=Math.min(9999,...Object.values(colForToken));
+
+  // rows: match each form label against label cells (left of the data columns)
+  const labelCells=grid.filter(g=>g.c<dataColMin);
+  function rowForLabel(label){
+    const target=norm(label);
+    const parts=label.split(/[-()/]/).map(norm).filter(s=>s.length>=4);
+    for(const g of labelCells) if(g.t===target) return g.r;
+    for(const g of labelCells) if(g.t.includes(target)||target.includes(g.t)) return g.r;
+    for(const g of labelCells) for(const p of parts) if(g.t.includes(p)) return g.r;
+    return null;
+  }
+
+  const cells={}; let count=0;
+  for(const f of DEFAULT_MAPPING){
+    if(f.section==="HDR") continue;
+    const col=colForToken[f.column], row=rowForLabel(f.rowLabel);
+    if(col && row){ cells[f.id]=colLetter(col)+row; count++; }
+  }
+  return {count,total:DEFAULT_MAPPING.length-1,cells};
 }
 
 /* ---- table calibration --------------------------------------------------
@@ -438,7 +489,18 @@ $("imageInput").addEventListener("change",e=>e.target.files[0]&&handleImage(e.ta
 $("templateInput").addEventListener("change",async e=>{
   const f=e.target.files[0]; if(!f) return;
   state.templateBuffer=await readBuffer(f);
-  $("templateStatus").textContent="✓ "+f.name; $("templateStatus").className="text-xs text-green-600";
+  $("templateStatus").textContent="✓ "+f.name+" — reading layout…"; $("templateStatus").className="text-xs text-slate-500";
+  try{
+    const det=await autoMapFromTemplate(state.templateBuffer);
+    saveAuto(det.cells);
+    state.fields=mappingWithOverrides();
+    $("templateStatus").textContent=`✓ ${f.name} — matched ${det.count}/${det.total} cells to your template`;
+    $("templateStatus").className="text-xs text-green-600";
+  }catch(err){
+    saveAuto({});
+    $("templateStatus").textContent="✓ "+f.name+" — couldn't auto-read layout, using Admin defaults";
+    $("templateStatus").className="text-xs text-amber-600";
+  }
   checkReady();
 });
 
@@ -552,7 +614,7 @@ $("resetBtn").addEventListener("click",()=>{ state.imageDataUrl=null; state.valu
 
 /* admin */
 function renderAdmin(){
-  const ov=getOverrides(), groups={};
+  const ov=getOverrides(), auto=getAuto(), groups={};
   DEFAULT_MAPPING.forEach(f=>(groups[f.section]=groups[f.section]||[]).push(f));
   $("adminTables").innerHTML=Object.entries(groups).map(([sec,fs])=>`
     <div class="card overflow-hidden">
@@ -560,13 +622,13 @@ function renderAdmin(){
       <div class="overflow-x-auto scroll"><table class="w-full text-sm">
         <thead class="text-left text-slate-500 border-b"><tr>
           <th class="px-4 py-2 font-medium">Row</th><th class="px-4 py-2 font-medium">Column</th>
-          <th class="px-4 py-2 font-medium">Default</th><th class="px-4 py-2 font-medium">Override</th></tr></thead>
-        <tbody>${fs.map(f=>`
+          <th class="px-4 py-2 font-medium">Detected cell</th><th class="px-4 py-2 font-medium">Override</th></tr></thead>
+        <tbody>${fs.map(f=>{ const detected=auto[f.id]; return `
           <tr class="border-b last:border-0">
             <td class="px-4 py-1.5">${f.rowLabel}</td><td class="px-4 py-1.5 text-slate-500">${f.column}</td>
-            <td class="px-4 py-1.5 text-slate-400">${f.excelCell}</td>
-            <td class="px-4 py-1.5"><input data-fid="${f.id}" placeholder="${f.excelCell}" value="${ov[f.id]||""}" class="adm-input cell rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500 uppercase"/></td>
-          </tr>`).join("")}</tbody>
+            <td class="px-4 py-1.5 ${detected?'text-green-600':'text-slate-400'}">${detected||f.excelCell+' (default)'}</td>
+            <td class="px-4 py-1.5"><input data-fid="${f.id}" placeholder="${detected||f.excelCell}" value="${ov[f.id]||""}" class="adm-input cell rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500 uppercase"/></td>
+          </tr>`;}).join("")}</tbody>
       </table></div>
     </div>`).join("");
 }
