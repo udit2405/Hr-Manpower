@@ -246,50 +246,97 @@ function mappingWithOverrides(){
 }
 
 /* ---- auto-detect Excel cells FROM the uploaded template -------------------
-   Both files share the layout, so we read the template, locate each row by its
-   label text and each column by its header text, and build the cell map. This
-   replaces hardcoded guesses — values land in the same cell as the form. */
+   Both files share the layout, so we walk the template top-to-bottom: find each
+   section's label rows in order, find that section's own header row, and map
+   every field to the real cell. Columns are matched by header text where
+   possible and by POSITION otherwise, so placeholder headers (XX/XXX) and
+   headers repeated in every section (Ist/Gen/Total) still land in the right
+   column of the right section. */
 function colLetter(c){ let s=""; while(c>0){ const m=(c-1)%26; s=String.fromCharCode(65+m)+s; c=Math.floor((c-1)/26);} return s; }
+
+const HEADER_TOKENS={
+  "Ist":["ist","1st","i"],"Gen":["gen","general"],"10:00":["1000"],
+  "IInd":["iind","2nd","ii"],"19:00":["1900"],"IIIrd":["iiird","3rd","iii"],
+  "Total":["total","tot"],"MID":["mid"],"XX":["xx"],"XXX":["xxx"],
+  "LINE 1":["line1"],"LINE 2":["line2"],"LINE 3":["line3"],
+  "LINE 4":["line4"],"LINE 5":["line5"],"LINE 6":["line6"]
+};
+
 async function autoMapFromTemplate(buffer){
   const wb=new ExcelJS.Workbook(); await wb.xlsx.load(buffer);
-  const ws=wb.worksheets[0]; if(!ws) return {count:0,total:DEFAULT_MAPPING.length,cells:{}};
+  const ws=wb.worksheets[0];
+  const total=DEFAULT_MAPPING.length-1;
+  if(!ws) return {count:0,total,cells:{},missing:["no worksheet found"]};
   const norm=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
-  const grid=[];
+
+  // every non-empty cell; skip merged slaves so each value has ONE address
+  // (the master's) — otherwise a header merged across columns matches twice
+  const grid=[], byRow={};
   ws.eachRow({includeEmpty:false},(row,r)=>row.eachCell({includeEmpty:false},(cell,c)=>{
-    const t=norm(cell.text); if(t) grid.push({r,c,t});
+    if(cell.type===ExcelJS.ValueType.Merge) return;
+    const t=norm(cell.text); if(!t) return;
+    const g={r,c,t}; grid.push(g); (byRow[r]=byRow[r]||[]).push(g);
   }));
+  grid.sort((a,b)=>a.r-b.r||a.c-b.c);
 
-  // columns: match header tokens (exact normalised equality is reliable here)
-  const tokenCandidates={
-    "Ist":["ist","1st"],"Gen":["gen"],"10:00":["1000"],"IInd":["iind","2nd"],
-    "19:00":["1900"],"IIIrd":["iiird","3rd"],"Total":["total"],"MID":["mid"],
-    "XX":["xx"],"XXX":["xxx"],"LINE 1":["line1"],"LINE 2":["line2"],"LINE 3":["line3"],
-    "LINE 4":["line4"],"LINE 5":["line5"],"LINE 6":["line6"],"Date":["date"]
-  };
-  const colForToken={};
-  for(const [key,cands] of Object.entries(tokenCandidates)){
-    const hit=grid.find(g=>cands.includes(g.t)); if(hit) colForToken[key]=hit.c;
-  }
-  const dataColMin=Math.min(9999,...Object.values(colForToken));
+  const cells={}; let count=0; const missing=[];
+  let cursor=1; // sections appear top-to-bottom; never match behind the previous one
 
-  // rows: match each form label against label cells (left of the data columns)
-  const labelCells=grid.filter(g=>g.c<dataColMin);
-  function rowForLabel(label){
-    const target=norm(label);
-    const parts=label.split(/[-()/]/).map(norm).filter(s=>s.length>=4);
-    for(const g of labelCells) if(g.t===target) return g.r;
-    for(const g of labelCells) if(g.t.includes(target)||target.includes(g.t)) return g.r;
-    for(const g of labelCells) for(const p of parts) if(g.t.includes(p)) return g.r;
-    return null;
+  for(const sec of SECTIONS){
+    // 1) locate this section's label rows, in template order
+    const rowFor={}; let rowCursor=cursor;
+    for(const row of sec.rows){
+      const target=norm(row.label);
+      let hit=grid.find(g=>g.r>=rowCursor && g.t===target);
+      if(!hit && target.length>=5)
+        hit=grid.find(g=>g.r>=rowCursor && (g.t.includes(target)||(g.t.length>=5&&target.includes(g.t))));
+      if(hit){ rowFor[row.label]=hit; rowCursor=hit.r+1; }
+    }
+    const found=Object.values(rowFor);
+    if(!found.length){ missing.push(sec.title+" (no rows found)"); continue; }
+    cursor=Math.max(...found.map(g=>g.r))+1;
+
+    // 2) this section's header row: nearest row above its first label row that
+    //    has enough cells to the right of the label column
+    const labelCol=Math.max(...found.map(g=>g.c));
+    const firstRow=Math.min(...found.map(g=>g.r));
+    let headerCells=null;
+    for(let r=firstRow-1;r>=Math.max(1,firstRow-5);r--){
+      const hc=(byRow[r]||[]).filter(g=>g.c>labelCol);
+      if(hc.length>=sec.cols.length-1){ headerCells=hc.sort((a,b)=>a.c-b.c); break; }
+    }
+
+    // 3) columns: header-text match first, position in the header row otherwise
+    const colFor={};
+    sec.cols.forEach((col,i)=>{
+      const cands=HEADER_TOKENS[col.key]||[norm(col.key)];
+      let c=null;
+      if(headerCells){
+        const hit=headerCells.find(g=>cands.includes(g.t));
+        c=hit?hit.c:(headerCells[i]?headerCells[i].c:null);
+      }
+      colFor[col.key]=c==null?labelCol+1+i:c;
+    });
+
+    // 4) emit a cell for every field in this section
+    for(const row of sec.rows){
+      const m=rowFor[row.label]; if(!m) continue;
+      for(const col of sec.cols){
+        cells[`${sec.section}.${slug(row.label)}.${slug(col.key)}`]=colLetter(colFor[col.key])+m.r;
+        count++;
+      }
+    }
+    const lost=sec.rows.filter(r=>!rowFor[r.label]).map(r=>r.label);
+    if(lost.length) missing.push(`${sec.title}: ${lost.join(", ")}`);
   }
 
-  const cells={}; let count=0;
-  for(const f of DEFAULT_MAPPING){
-    if(f.section==="HDR") continue;
-    const col=colForToken[f.column], row=rowForLabel(f.rowLabel);
-    if(col && row){ cells[f.id]=colLetter(col)+row; count++; }
-  }
-  return {count,total:DEFAULT_MAPPING.length-1,cells};
+  // header date: the value goes right of a "date" label in the top rows;
+  // prefer the rightmost match — that's where the date sits on these forms
+  const dateLbl=grid.filter(g=>g.r<=4 && g.t.includes("date")).sort((a,b)=>b.c-a.c)[0];
+  if(dateLbl && !(byRow[dateLbl.r]||[]).some(g=>g.c===dateLbl.c+1))
+    cells["HDR.DATE"]=colLetter(dateLbl.c+1)+dateLbl.r;
+
+  return {count,total,cells,missing};
 }
 
 /* ---- table calibration --------------------------------------------------
@@ -477,7 +524,8 @@ async function fillTemplate(templateBuffer, cellValues){
   const ws=wb.worksheets[0];
   for(const [addr,raw] of Object.entries(cellValues)){
     if(raw===undefined||raw===null||raw==="") continue;
-    const cell=ws.getCell(addr);
+    let cell=ws.getCell(addr);
+    if(cell.master && cell.master!==cell) cell=cell.master; // merged: only the master displays a value
     const num=Number(raw);
     cell.value=(!Number.isNaN(num) && /^[0-9]+(\.[0-9]+)?$/.test(String(raw).trim())) ? num : raw;
   }
@@ -563,8 +611,9 @@ $("templateInput").addEventListener("change",async e=>{
     const det=await autoMapFromTemplate(state.templateBuffer);
     saveAuto(det.cells);
     state.fields=mappingWithOverrides();
-    $("templateStatus").textContent=`✓ ${f.name} — matched ${det.count}/${det.total} cells to your template`;
-    $("templateStatus").className="text-xs text-green-600";
+    const warn=(det.missing&&det.missing.length)?` · not found: ${det.missing.join(" | ")}`:"";
+    $("templateStatus").textContent=`✓ ${f.name} — matched ${det.count}/${det.total} cells to your template${warn}`;
+    $("templateStatus").className="text-xs "+(warn?"text-amber-600":"text-green-600");
   }catch(err){
     saveAuto({});
     $("templateStatus").textContent="✓ "+f.name+" — couldn't auto-read layout, using Admin defaults";
