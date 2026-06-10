@@ -253,11 +253,11 @@ async function autoMapFromTemplate(buffer){
   ws.eachRow({includeEmpty:false},(row,r)=>row.eachCell({includeEmpty:false},(cell,c)=>{
     if(cell.type===ExcelJS.ValueType.Merge) return;
     const t=norm(cell.text); if(!t) return;
-    const g={r,c,t}; grid.push(g); (byRow[r]=byRow[r]||[]).push(g);
+    const g={r,c,t,raw:String(cell.text||"").trim()}; grid.push(g); (byRow[r]=byRow[r]||[]).push(g);
   }));
   grid.sort((a,b)=>a.r-b.r||a.c-b.c);
 
-  const cells={}; let count=0; const missing=[];
+  const cells={}; let count=0; const missing=[]; const layout={};
   let cursor=1; // sections appear top-to-bottom; never match behind the previous one
 
   for(const sec of SECTIONS){
@@ -296,7 +296,18 @@ async function autoMapFromTemplate(buffer){
       colFor[col.key]=c==null?labelCol+1+i:c;
     });
 
-    // 4) emit a cell for every field in this section
+    // 4) remember this section's REAL printed headers and row positions — the
+    //    AI is told these exact header strings and keys every value by them,
+    //    so a value can only ever land under the header it was read from
+    layout[sec.section]={
+      headers: headerCells
+        ? headerCells.map(h=>({text:h.raw||h.t,norm:h.t,col:h.c}))
+        : sec.cols.map(col=>({text:col.key,norm:norm(col.key),col:colFor[col.key]})),
+      rows:{}
+    };
+    for(const row of sec.rows){ const m=rowFor[row.label]; if(m) layout[sec.section].rows[row.label]=m.r; }
+
+    // 5) emit a cell for every field in this section
     for(const row of sec.rows){
       const m=rowFor[row.label]; if(!m) continue;
       for(const col of sec.cols){
@@ -314,8 +325,11 @@ async function autoMapFromTemplate(buffer){
   if(dateLbl && !(byRow[dateLbl.r]||[]).some(g=>g.c===dateLbl.c+1))
     cells["HDR.DATE"]=colLetter(dateLbl.c+1)+dateLbl.r;
 
-  return {count,total,cells,missing};
+  return {count,total,cells,missing,layout};
 }
+/* layout of the LAST loaded template (real headers + row numbers) — this is
+   the single source of truth for where every value goes */
+let templateLayout=null;
 
 /* ============================================================================
    2) CANVAS HELPERS (PDF rendering + image downscale)
@@ -356,21 +370,24 @@ const aiProvider=k=>!k?"puter":k.startsWith("sk-ant")?"claude":k.startsWith("sk-
   if(m){ saveVisionKey(decodeURIComponent(m[1])); history.replaceState(null,"",location.pathname+location.search); }
 })();
 
-function aiPrompt(){
+function aiPrompt(layout){
   let p=`You are reading a photographed DAILY MANPOWER REPORT form filled in by hand. `+
-    `Read every handwritten number carefully, exactly as written. Do not calculate, guess or "correct" totals — copy what is on the paper.\n\n`+
-    `The form has these sections, each with the listed rows and columns:\n`;
+    `Read every handwritten number exactly as written. Do not calculate, guess or "correct" totals — copy what is on the paper.\n\n`+
+    `The form's printed table layout is described below. The column header strings are EXACTLY as printed on the form:\n`;
   for(const sec of SECTIONS){
-    p+=`\nSection "${sec.section}" — ${sec.title}\nColumns (left to right): ${sec.cols.map(c=>c.key).join(" | ")}\nRows:\n`;
+    const lay=layout&&layout[sec.section];
+    const headers=(lay&&lay.headers&&lay.headers.length)?lay.headers.map(h=>h.text):sec.cols.map(c=>c.key);
+    p+=`\nSection "${sec.section}" — ${sec.title}\nColumn headers, left to right: ${headers.map(h=>`"${h}"`).join(", ")}\nRows:\n`;
     for(const row of sec.rows) p+=`- ${row.label}\n`;
   }
   p+=`\nReturn ONLY valid JSON (no markdown, no commentary) in exactly this shape:\n`+
-    `{"date":"<date written at the top of the form, or \\"\\">","sections":{"A":{"<ROW LABEL>":[v,v,v,v,v,v,v]},"B1":{...},"B2":{...},"C":{...}}}\n`+
-    `Rules:\n`+
-    `- Use the row labels EXACTLY as listed above.\n`+
-    `- Each row's array must have exactly as many values as that section has columns, in the listed column order (the last one is Total).\n`+
-    `- Each value is a non-negative integer, or null if the cell is blank or unreadable.\n`+
-    `- Include every listed row, even if all its cells are blank.`;
+    `{"date":"<date written at the top of the form, or \\"\\">","sections":{"A":{"<ROW LABEL>":{"<COLUMN HEADER>":<integer or null>, …}},"B1":{…},"B2":{…},"C":{…}}}\n`+
+    `COLUMN ACCURACY RULES — these matter most:\n`+
+    `- Work row by row. Within a row, walk the columns LEFT TO RIGHT and key each handwritten value by the printed header string directly ABOVE it.\n`+
+    `- A blank cell is null. NEVER skip blanks and shift a value to a neighbouring column: if a row only has a number under the 3rd column, every other column of that row must be null.\n`+
+    `- Before answering, re-check each row: the count of values+nulls must equal the number of columns, each under its own header.\n`+
+    `- Use the row labels and column header strings EXACTLY as listed above — do not rename, translate or reorder them.\n`+
+    `- Values are non-negative integers. Include every listed row, even if fully blank.`;
   return p;
 }
 
@@ -440,23 +457,62 @@ function parseAIJson(text){
   return JSON.parse(text.slice(s,e+1));
 }
 
-/* turn the AI's JSON into one result per field, matching rows by label */
-function aiToResults(data){
+/* build the working field list straight from the template layout: one field
+   per (row found in template) × (header found in template), each pinned to the
+   exact Excel cell where that header's column crosses that row. Falls back to
+   the built-in defaults only when no template layout could be read. */
+function dynamicFields(layout){
+  if(!layout) return mappingWithOverrides();
+  const fields=[{id:"HDR.DATE",section:"HDR",sectionTitle:"Header",rowLabel:"Report Date",
+    column:"Date",excelCell:(getAuto()["HDR.DATE"]||"H2"),numeric:false,isTotal:false}];
+  for(const sec of SECTIONS){
+    const lay=layout[sec.section]; if(!lay) continue;
+    for(const row of sec.rows){
+      const r=lay.rows[row.label]; if(!r) continue;
+      for(const h of lay.headers){
+        fields.push({
+          id:`${sec.section}.${slug(row.label)}.${slug(h.text)||("col"+h.col)}`,
+          section:sec.section, sectionTitle:sec.title, rowLabel:row.label, column:h.text,
+          excelCell:colLetter(h.col)+r, numeric:true, isTotal:h.norm.includes("total")
+        });
+      }
+    }
+  }
+  return fields;
+}
+
+/* turn the AI's JSON into one result per field: rows matched by label, values
+   matched by the exact column header string the AI keyed them with */
+function aiToResults(data,fields){
   const normL=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
   const results=[];
   results.push({id:"HDR.DATE",value:data.date?String(data.date):"",confidence:data.date?95:0,edited:false});
-  for(const sec of SECTIONS){
-    const rows=(data.sections&&data.sections[sec.section])||{};
-    const keys=Object.keys(rows);
-    for(const row of sec.rows){
-      const k=keys.find(x=>normL(x)===normL(row.label))||keys.find(x=>normL(x).includes(normL(row.label))||normL(row.label).includes(normL(x)));
-      const vals=(k?rows[k]:[])||[];
-      sec.cols.forEach((col,i)=>{
-        const v=vals[i];
-        const value=(v===null||v===undefined||v==="")?"":String(v).replace(/[^0-9]/g,"");
-        results.push({id:`${sec.section}.${slug(row.label)}.${slug(col.key)}`,value,confidence:value?95:0,edited:false});
-      });
+  const rowCache={};
+  for(const f of fields){
+    if(f.section==="HDR") continue;
+    const ck=f.section+"|"+f.rowLabel;
+    let rowObj=rowCache[ck];
+    if(rowObj===undefined){
+      const rows=(data.sections&&data.sections[f.section])||{};
+      const keys=Object.keys(rows);
+      const k=keys.find(x=>normL(x)===normL(f.rowLabel))
+            ||keys.find(x=>normL(x).includes(normL(f.rowLabel))||normL(f.rowLabel).includes(normL(x)));
+      rowObj=rowCache[ck]=(k?rows[k]:null);
     }
+    let v=null;
+    if(Array.isArray(rowObj)){
+      // legacy positional answer (only happens without a template layout)
+      const sec=SECTIONS.find(s=>s.section===f.section);
+      const idx=sec?sec.cols.findIndex(c=>c.key===f.column):-1;
+      v=idx>=0?rowObj[idx]:null;
+    }else if(rowObj&&typeof rowObj==="object"){
+      const hks=Object.keys(rowObj);
+      const hk=hks.find(x=>normL(x)===normL(f.column))
+             ||hks.find(x=>normL(x)&&normL(f.column)&&(normL(x).includes(normL(f.column))||normL(f.column).includes(normL(x))));
+      if(hk!==undefined) v=rowObj[hk];
+    }
+    const value=(v===null||v===undefined||v==="")?"":String(v).replace(/[^0-9]/g,"");
+    results.push({id:f.id,value,confidence:value?95:0,edited:false});
   }
   return results;
 }
@@ -464,29 +520,35 @@ function aiToResults(data){
 /* accuracy cross-check: a row's shift values must add up to its Total column.
    Rows that don't add up get their confidence dropped so they show red in the
    review — that's where a reading mistake is hiding, check those first. */
-function flagMismatches(vals){
+function flagMismatches(vals,fields){
   const map={}; vals.forEach(v=>map[v.id]=v);
+  const groups={};
+  for(const f of fields){
+    if(f.section==="HDR") continue;
+    (groups[f.section+"|"+f.rowLabel]=groups[f.section+"|"+f.rowLabel]||[]).push(f);
+  }
   let bad=0;
-  for(const sec of SECTIONS) for(const row of sec.rows){
-    const ids=sec.cols.map(c=>`${sec.section}.${slug(row.label)}.${slug(c.key)}`);
-    const tot=map[ids[ids.length-1]];
-    if(!tot||tot.value==="") continue;
-    const parts=ids.slice(0,-1).map(i=>map[i]).filter(v=>v&&v.value!=="");
+  for(const fs of Object.values(groups)){
+    const tot=fs.find(f=>f.isTotal!==undefined?f.isTotal:/total/i.test(f.column));
+    if(!tot) continue;
+    const totV=map[tot.id];
+    if(!totV||totV.value==="") continue;
+    const parts=fs.filter(f=>f!==tot&&!(f.isTotal||/total/i.test(f.column))).map(f=>map[f.id]).filter(v=>v&&v.value!=="");
     if(!parts.length) continue;
     const sum=parts.reduce((s,v)=>s+Number(v.value),0);
-    if(Number(tot.value)!==sum){
+    if(Number(totV.value)!==sum){
       bad++;
-      ids.forEach(i=>{ if(map[i]&&map[i].value!=="") map[i].confidence=Math.min(map[i].confidence,45); });
+      fs.forEach(f=>{ if(map[f.id]&&map[f.id].value!=="") map[f.id].confidence=Math.min(map[f.id].confidence,45); });
     }
   }
   return bad;
 }
 
-async function extractAI(imageDataUrl,key,onProgress){
+async function extractAI(imageDataUrl,key,fields,onProgress){
   const dataUrl=await downscale(imageDataUrl);
   const mime=(dataUrl.match(/^data:([^;]+)/)||[])[1]||"image/png";
   const b64=dataUrl.split(",")[1];
-  const prompt=aiPrompt();
+  const prompt=aiPrompt(templateLayout);
   onProgress&&onProgress(15);
   const prov=aiProvider(key);
   let text;
@@ -495,7 +557,7 @@ async function extractAI(imageDataUrl,key,onProgress){
   else if(prov==="claude") text=await callClaude(key,b64,mime,prompt);
   else text=await callOpenAI(key,dataUrl,prompt);
   onProgress&&onProgress(85);
-  const out=aiToResults(parseAIJson(text));
+  const out=aiToResults(parseAIJson(text),fields);
   onProgress&&onProgress(100);
   return out;
 }
@@ -580,7 +642,9 @@ async function tryBuiltinTemplate(){
     const det=await autoMapFromTemplate(buf);
     if(!det.count) return;
     state.templateBuffer=buf;
-    saveAuto(det.cells); state.fields=mappingWithOverrides();
+    saveAuto(det.cells);
+    templateLayout=det.layout;
+    state.fields=dynamicFields(templateLayout);
     $("templateStatus").textContent=`✓ company template loaded automatically (${det.count}/${det.total} cells) — upload a file only to use a different one`;
     $("templateStatus").className="text-xs text-green-600";
     checkReady();
@@ -615,7 +679,8 @@ $("templateInput").addEventListener("change",async e=>{
   try{
     const det=await autoMapFromTemplate(state.templateBuffer);
     saveAuto(det.cells);
-    state.fields=mappingWithOverrides();
+    templateLayout=det.layout;
+    state.fields=dynamicFields(templateLayout);
     const warn=(det.missing&&det.missing.length)?` · not found: ${det.missing.join(" | ")}`:"";
     $("templateStatus").textContent=`✓ ${f.name} — matched ${det.count}/${det.total} cells to your template${warn}`;
     $("templateStatus").className="text-xs "+(warn?"text-amber-600":"text-green-600");
@@ -642,7 +707,7 @@ $("saveKey").addEventListener("click",()=>{ saveVisionKey($("visionKey").value);
 $("extractBtn").addEventListener("click",async()=>{
   $("uploadError").textContent="";
   const key=getVisionKey();
-  state.fields=mappingWithOverrides();
+  state.fields=dynamicFields(templateLayout);
   $("progressWrap").classList.remove("hidden");
   $("extractBtn").disabled=true; $("extractBtn").textContent="Reading…";
   $("progressLabel").textContent=key?"AI is reading the form…":"Free AI is reading the form… (a one-time sign-in window may pop up — it's free)";
@@ -651,8 +716,8 @@ $("extractBtn").addEventListener("click",async()=>{
   // creep the bar while the AI call is in flight so it doesn't look stuck
   let creep=5; const tick=setInterval(()=>{ if(creep<80){ creep+=2; setPct(creep); } },800);
   try{
-    const vals=await extractAI(state.imageDataUrl,key,p=>{ creep=Math.max(creep,p); setPct(creep); });
-    state.mismatches=flagMismatches(vals);
+    const vals=await extractAI(state.imageDataUrl,key,state.fields,p=>{ creep=Math.max(creep,p); setPct(creep); });
+    state.mismatches=flagMismatches(vals,state.fields);
     state.values={}; vals.forEach(v=>state.values[v.id]=v);
     renderReview(); showStep("review");
   }catch(e){ $("uploadError").textContent=e.message||"AI reading failed — try again."; }
