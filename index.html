@@ -474,6 +474,9 @@ async function fillTemplate(templateBuffer, cellValues){
     if(raw===undefined||raw===null||raw==="") continue;
     let cell=ws.getCell(addr);
     if(cell.master && cell.master!==cell) cell=cell.master; // merged: only the master displays a value
+    // cells that already hold a formula (e.g. the Total column) calculate
+    // themselves — overwriting one corrupts Excel's shared formulas
+    if(cell.type===ExcelJS.ValueType.Formula) continue;
     const num=Number(raw);
     cell.value=(!Number.isNaN(num) && /^[0-9]+(\.[0-9]+)?$/.test(String(raw).trim())) ? num : raw;
   }
