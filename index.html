@@ -76,6 +76,16 @@
         <span id="templateStatus" class="text-xs text-slate-400"></span>
       </div>
 
+      <div class="card p-4 mt-4 flex items-center gap-3 flex-wrap">
+        <div class="grow min-w-[220px]">
+          <p class="font-medium text-sm">🖋️ Google Vision API key <span class="text-slate-400 font-normal">— handwriting reader</span></p>
+          <p class="text-xs text-slate-400">Stored only in this browser, never uploaded to any server but Google's. Leave blank to use the basic (less accurate) reader. <a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="text-indigo-700 underline">Get a key</a> (enable the Cloud Vision API).</p>
+        </div>
+        <input id="visionKey" type="password" placeholder="AIza…" class="text-sm border border-slate-300 rounded-lg px-2 py-1 w-56" />
+        <button id="saveKey" class="btn btn-ghost text-sm">Save key</button>
+        <span id="keyStatus" class="text-xs"></span>
+      </div>
+
       <p id="uploadError" class="text-red-600 mt-4 text-sm"></p>
 
       <div id="progressWrap" class="mt-6 hidden">
@@ -400,6 +410,65 @@ async function extractAll(imageSrc, fields, onProgress){
 }
 
 /* ============================================================================
+   3b) GOOGLE VISION (handwriting) — one call on the full image, then assign
+   each detected number to the cell whose region its position falls inside.
+   Far more accurate on handwriting than Tesseract. Key stays in localStorage.
+   ============================================================================ */
+const KEY_KEY="mpr.visionKey";
+const getVisionKey=()=>localStorage.getItem(KEY_KEY)||"";
+const saveVisionKey=k=>localStorage.setItem(KEY_KEY,(k||"").trim());
+
+function sliceCrop(canvas,region){
+  const sx=region.x*canvas.width, sy=region.y*canvas.height;
+  const sw=Math.max(1,region.w*canvas.width), sh=Math.max(1,region.h*canvas.height);
+  const out=makeCanvas(Math.round(sw*2),Math.round(sh*2));
+  out.getContext("2d").drawImage(canvas,sx,sy,sw,sh,0,0,out.width,out.height);
+  return out.toDataURL("image/png");
+}
+function visionWords(resp){
+  const out=[]; const page=resp.fullTextAnnotation && resp.fullTextAnnotation.pages && resp.fullTextAnnotation.pages[0];
+  if(!page) return out;
+  for(const block of page.blocks||[])
+    for(const para of block.paragraphs||[])
+      for(const word of para.words||[]){
+        const text=(word.symbols||[]).map(s=>s.text).join("");
+        const vs=(word.boundingBox&&word.boundingBox.vertices)||[];
+        if(!vs.length||!text) continue;
+        const xs=vs.map(v=>v.x||0), ys=vs.map(v=>v.y||0);
+        out.push({ text, conf:Math.round((word.confidence||0)*100),
+          cx:(Math.min(...xs)+Math.max(...xs))/2, cy:(Math.min(...ys)+Math.max(...ys))/2 });
+      }
+  return out;
+}
+async function extractAllVision(imageSrc, fields, key, onProgress){
+  const img=await loadImage(imageSrc);
+  const W=img.naturalWidth, H=img.naturalHeight;
+  const base=makeCanvas(W,H); base.getContext("2d").drawImage(img,0,0);
+  const b64=(imageSrc.split(",")[1]) || base.toDataURL("image/png").split(",")[1];
+  onProgress&&onProgress(5,100);
+  const res=await fetch("https://vision.googleapis.com/v1/images:annotate?key="+encodeURIComponent(key),{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({requests:[{image:{content:b64},features:[{type:"DOCUMENT_TEXT_DETECTION"}]}]})
+  });
+  if(!res.ok){ const t=await res.text(); throw new Error("Vision API "+res.status+": "+t.slice(0,160)); }
+  const data=await res.json();
+  const resp=(data.responses&&data.responses[0])||{};
+  if(resp.error) throw new Error("Vision: "+resp.error.message);
+  onProgress&&onProgress(60,100);
+  const words=visionWords(resp).map(w=>({...w,nx:w.cx/W,ny:w.cy/H}));
+  const results=fields.map(f=>{
+    const inside=words.filter(w=> w.nx>=f.region.x && w.nx<=f.region.x+f.region.w && w.ny>=f.region.y && w.ny<=f.region.y+f.region.h);
+    inside.sort((a,b)=>a.cx-b.cx);
+    let value=inside.map(w=>w.text).join("").trim();
+    if(f.numeric) value=cleanNumeric(value);
+    const conf=inside.length?Math.round(inside.reduce((s,w)=>s+w.conf,0)/inside.length):0;
+    return {id:f.id,value,confidence:conf,edited:false,crop:sliceCrop(base,f.region)};
+  });
+  onProgress&&onProgress(100,100);
+  return results;
+}
+
+/* ============================================================================
    4) EXCEL — fill the uploaded template in-browser with ExcelJS
    ============================================================================ */
 async function fillTemplate(templateBuffer, cellValues){
@@ -504,6 +573,16 @@ $("templateInput").addEventListener("change",async e=>{
   checkReady();
 });
 
+/* vision key field */
+function refreshKeyStatus(){
+  const k=getVisionKey();
+  $("keyStatus").textContent = k ? "✓ Vision active" : "basic reader";
+  $("keyStatus").className = "text-xs " + (k?"text-green-600":"text-slate-400");
+}
+$("visionKey").value=getVisionKey();
+refreshKeyStatus();
+$("saveKey").addEventListener("click",()=>{ saveVisionKey($("visionKey").value); refreshKeyStatus(); });
+
 /* upload -> calibrate */
 $("extractBtn").addEventListener("click",()=>{ showStep("calibrate"); renderCalib(); });
 
@@ -551,10 +630,11 @@ $("calibExtractBtn").addEventListener("click",async()=>{
   $("calibProgress").classList.remove("hidden");
   $("calibExtractBtn").disabled=true; $("calibExtractBtn").textContent="Reading…";
   try{
-    const vals=await extractAll(state.imageDataUrl,fields,(done,total)=>{
-      const pct=Math.round(done/total*100);
-      $("calibPct").textContent=pct+"%"; $("calibBar").style.width=pct+"%";
-    });
+    const key=getVisionKey();
+    const onProg=(done,total)=>{ const pct=Math.round(done/total*100); $("calibPct").textContent=pct+"%"; $("calibBar").style.width=pct+"%"; };
+    const vals = key
+      ? await extractAllVision(state.imageDataUrl, fields, key, onProg)
+      : await extractAll(state.imageDataUrl, fields, onProg);
     state.values={}; vals.forEach(v=>state.values[v.id]=v);
     renderReview(); showStep("review");
   }catch(e){ alert(e.message||"OCR failed"); }
