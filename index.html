@@ -7,8 +7,6 @@
 
 <!-- Tailwind (Play CDN) -->
 <script src="https://cdn.tailwindcss.com"></script>
-<!-- Tesseract.js (browser OCR) -->
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
 <!-- ExcelJS (browser Excel writing) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <!-- pdf.js (first page of PDF -> image) -->
@@ -50,7 +48,7 @@
     <!-- STEP 1: UPLOAD -->
     <div id="step-upload">
       <h1 class="text-2xl font-bold mb-1">Upload the manpower report</h1>
-      <p class="text-slate-500 mb-6">Drop a photo/scan of the form, attach your blank Excel template, then extract. Everything runs in your browser — nothing is uploaded to a server.</p>
+      <p class="text-slate-500 mb-6">Drop a photo of the filled form, attach your blank Excel template, then click extract. The AI reads the handwriting and the figures land in the matching cells of your Excel — no alignment needed.</p>
 
       <div class="grid md:grid-cols-2 gap-6">
         <div id="dropzone" class="card p-8 flex flex-col items-center justify-center text-center border-dashed border-2 cursor-pointer min-h-[240px]">
@@ -78,10 +76,10 @@
 
       <div class="card p-4 mt-4 flex items-center gap-3 flex-wrap">
         <div class="grow min-w-[220px]">
-          <p class="font-medium text-sm">🖋️ Google Vision API key <span class="text-slate-400 font-normal">— handwriting reader</span></p>
-          <p class="text-xs text-slate-400">Stored only in this browser, never uploaded to any server but Google's. Leave blank to use the basic (less accurate) reader. <a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="text-indigo-700 underline">Get a key</a> (enable the Cloud Vision API).</p>
+          <p class="font-medium text-sm">🤖 AI key <span class="text-slate-400 font-normal">— reads the handwriting, like ChatGPT does</span></p>
+          <p class="text-xs text-slate-400">Paste a <a href="https://aistudio.google.com/apikey" target="_blank" class="text-indigo-700 underline">free Google Gemini key</a> (starts with AIza), or a Claude key (sk-ant-…) or OpenAI key (sk-…). Stored only in this browser and sent only to that AI provider.</p>
         </div>
-        <input id="visionKey" type="password" placeholder="AIza…" class="text-sm border border-slate-300 rounded-lg px-2 py-1 w-56" />
+        <input id="visionKey" type="password" placeholder="AIza… / sk-ant-… / sk-…" class="text-sm border border-slate-300 rounded-lg px-2 py-1 w-56" />
         <button id="saveKey" class="btn btn-ghost text-sm">Save key</button>
         <span id="keyStatus" class="text-xs"></span>
       </div>
@@ -95,28 +93,6 @@
 
       <div class="mt-6">
         <button id="extractBtn" class="btn btn-primary" disabled>Extract values →</button>
-      </div>
-    </div>
-
-    <!-- STEP 1b: CALIBRATE -->
-    <div id="step-calibrate" class="hidden">
-      <h1 class="text-2xl font-bold mb-1">Align the grid to your form</h1>
-      <p class="text-slate-500 mb-4">Drag the four <span class="text-indigo-700 font-medium">blue dots</span> so the box hugs the outer border of the table in your photo. The <span class="text-amber-600 font-medium">yellow boxes</span> show exactly which pixels each cell will read — line them up over the handwritten numbers. This is saved for next time.</p>
-      <div id="calibWrap" class="card p-0 inline-block overflow-hidden select-none touch-none align-top">
-        <div class="relative inline-block">
-          <img id="calibImg" class="block max-h-[68vh] max-w-full" />
-          <div id="calibLayer" class="absolute inset-0"></div>
-        </div>
-      </div>
-      <div id="calibProgress" class="mt-4 hidden max-w-md">
-        <div class="flex justify-between text-sm mb-1"><span>Extracting…</span><span id="calibPct">0%</span></div>
-        <div class="h-2 bg-slate-200 rounded-full overflow-hidden"><div id="calibBar" class="h-full bg-indigo-700 transition-all" style="width:0%"></div></div>
-      </div>
-      <div class="mt-4 flex gap-3 items-center flex-wrap">
-        <button id="calibExtractBtn" class="btn btn-primary">Extract values →</button>
-        <button id="calibBack" class="btn btn-ghost">← Back</button>
-        <button id="calibReset" class="btn btn-ghost">Reset box</button>
-        <label class="text-sm self-center flex items-center gap-2"><input type="checkbox" id="showCells" checked/> show cell boxes</label>
       </div>
     </div>
 
@@ -169,7 +145,7 @@
 </main>
 
 <footer class="mx-auto max-w-6xl px-4 py-8 text-center text-xs text-slate-400">
-  Static template-based OCR · Tesseract.js + ExcelJS · runs 100% in your browser
+  AI form reader · Gemini / Claude / OpenAI + ExcelJS · runs in your browser, image goes only to your AI provider
 </footer>
 
 <script>
@@ -339,180 +315,118 @@ async function autoMapFromTemplate(buffer){
   return {count,total,cells,missing};
 }
 
-/* ---- table calibration --------------------------------------------------
-   All region coords were measured against a reference photo whose table outer
-   border sits at REF_TABLE. The user marks where that border is in THEIR photo
-   (calRect); we remap every region from the reference box into their box, so
-   the crops line up regardless of margins/zoom/position. */
-const REF_TABLE = { x0:0.17, y0:0.085, x1:0.985, y1:0.955 };
-const CAL_KEY = "mpr.tableRect";
-const getTableRect = () => JSON.parse(localStorage.getItem(CAL_KEY) || "null") || {...REF_TABLE};
-const saveTableRect = r => localStorage.setItem(CAL_KEY, JSON.stringify(r));
-function calibrateFields(fields, rect){
-  const rw=REF_TABLE.x1-REF_TABLE.x0, rh=REF_TABLE.y1-REF_TABLE.y0;
-  const uw=rect.x1-rect.x0, uh=rect.y1-rect.y0;
-  return fields.map(f=>{
-    const u0=(f.region.x-REF_TABLE.x0)/rw, v0=(f.region.y-REF_TABLE.y0)/rh;
-    const u1=(f.region.x+f.region.w-REF_TABLE.x0)/rw, v1=(f.region.y+f.region.h-REF_TABLE.y0)/rh;
-    return {...f, region:{ x:rect.x0+u0*uw, y:rect.y0+v0*uh, w:(u1-u0)*uw, h:(v1-v0)*uh }};
-  });
-}
-
 /* ============================================================================
-   2) PREPROCESSING — grayscale, contrast, denoise, deskew, crop (canvas).
+   2) CANVAS HELPER (PDF rendering)
    ============================================================================ */
-function loadImage(src){ return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=src; }); }
 function makeCanvas(w,h){ const c=document.createElement("canvas"); c.width=w; c.height=h; return c; }
-const clamp = v => v<0?0:v>255?255:v;
-
-function applyFilters(canvas, opts){
-  const ctx = canvas.getContext("2d");
-  const {width:w, height:h} = canvas;
-  const img = ctx.getImageData(0,0,w,h), d = img.data;
-  const c = (opts.contrast ?? 25)/100;
-  const factor = (1.015*(c+1))/(1.0*(1.015-c));
-  for(let i=0;i<d.length;i+=4){
-    let r=d[i],g=d[i+1],b=d[i+2];
-    if(opts.grayscale!==false){ const gr=0.299*r+0.587*g+0.114*b; r=g=b=gr; }
-    r=factor*(r-128)+128; g=factor*(g-128)+128; b=factor*(b-128)+128;
-    if(opts.binarize){ const v=r<145?0:255; r=g=b=v; }
-    d[i]=clamp(r); d[i+1]=clamp(g); d[i+2]=clamp(b);
-  }
-  ctx.putImageData(img,0,0);
-}
-
-function estimateSkew(canvas){
-  const sw=Math.min(600,canvas.width), scale=sw/canvas.width, sh=Math.round(canvas.height*scale);
-  const small=makeCanvas(sw,sh); small.getContext("2d").drawImage(canvas,0,0,sw,sh);
-  const data=small.getContext("2d").getImageData(0,0,sw,sh).data;
-  const ink=new Uint8Array(sw*sh);
-  for(let i=0;i<sw*sh;i++) ink[i]=data[i*4]<140?1:0;
-  let bestA=0,bestS=-1;
-  for(let a=-4;a<=4;a+=0.5){
-    const tan=Math.tan(a*Math.PI/180); const rows=new Float64Array(sh);
-    for(let y=0;y<sh;y++){ let s=0; for(let x=0;x<sw;x++){ const sy=Math.round(y+(x-sw/2)*tan); if(sy>=0&&sy<sh) s+=ink[sy*sw+x]; } rows[y]=s; }
-    let mean=0; for(const v of rows) mean+=v; mean/=sh;
-    let varr=0; for(const v of rows) varr+=(v-mean)**2;
-    if(varr>bestS){ bestS=varr; bestA=a; }
-  }
-  return bestA;
-}
-function rotate(canvas,deg){
-  if(Math.abs(deg)<0.25) return canvas;
-  const rad=deg*Math.PI/180, {width:w,height:h}=canvas, out=makeCanvas(w,h), ctx=out.getContext("2d");
-  ctx.fillStyle="#fff"; ctx.fillRect(0,0,w,h);
-  ctx.translate(w/2,h/2); ctx.rotate(-rad); ctx.drawImage(canvas,-w/2,-h/2);
-  return out;
-}
-async function preprocess(src){
-  const img=await loadImage(src);
-  const canvas=makeCanvas(img.naturalWidth,img.naturalHeight);
-  canvas.getContext("2d").drawImage(img,0,0);
-  // NOTE: no auto-rotate here — the user aligns the grid manually on the
-  // un-rotated image, so we must keep the same geometry for crops to match.
-  applyFilters(canvas,{grayscale:true,contrast:25});
-  return canvas;
-}
-function cropRegion(canvas,region,upscale=2){
-  const sx=Math.round(region.x*canvas.width), sy=Math.round(region.y*canvas.height);
-  const sw=Math.max(1,Math.round(region.w*canvas.width)), sh=Math.max(1,Math.round(region.h*canvas.height));
-  const out=makeCanvas(sw*upscale,sh*upscale), ctx=out.getContext("2d");
-  ctx.imageSmoothingEnabled=true;
-  ctx.drawImage(canvas,sx,sy,sw,sh,0,0,sw*upscale,sh*upscale);
-  applyFilters(out,{grayscale:true,contrast:35,binarize:true});
-  return out;
-}
 
 /* ============================================================================
-   3) OCR — per-region recognition with Tesseract.js
-   ============================================================================ */
-let _worker=null;
-async function getWorker(){
-  if(!_worker){ _worker = await Tesseract.createWorker("eng"); }
-  return _worker;
-}
-function cleanNumeric(raw){
-  let s=raw.replace(/[^0-9]/g,"");
-  if(s===""){ s=raw.replace(/[oO]/g,"0").replace(/[lI|]/g,"1").replace(/[sS]/g,"5").replace(/[bB]/g,"6").replace(/[^0-9]/g,""); }
-  return s;
-}
-async function extractAll(imageSrc, fields, onProgress){
-  const page=await preprocess(imageSrc);
-  const worker=await getWorker();
-  const results=[];
-  for(let i=0;i<fields.length;i++){
-    const f=fields[i];
-    const url=cropRegion(page,f.region,2).toDataURL("image/png");
-    await worker.setParameters({
-      tessedit_char_whitelist: f.numeric ? "0123456789" : "",
-      tessedit_pageseg_mode: "7" // single line
-    });
-    let value="",confidence=0;
-    try{ const {data}=await worker.recognize(url); confidence=Math.round(data.confidence||0);
-      value=f.numeric?cleanNumeric(data.text):data.text.trim(); }catch(e){ confidence=0; }
-    results.push({id:f.id,value,confidence,edited:false,crop:url});
-    onProgress && onProgress(i+1,fields.length);
-  }
-  return results;
-}
-
-/* ============================================================================
-   3b) GOOGLE VISION (handwriting) — one call on the full image, then assign
-   each detected number to the cell whose region its position falls inside.
-   Far more accurate on handwriting than Tesseract. Key stays in localStorage.
+   3) AI EXTRACTION — send the whole photo to a vision AI model with the known
+   form structure; it reads the handwriting and returns every value as JSON
+   keyed by row label + column. No grid alignment, no calibration.
+   Works with a Google Gemini key (AIza…), Claude key (sk-ant-…) or
+   OpenAI key (sk-…). The key stays in localStorage.
    ============================================================================ */
 const KEY_KEY="mpr.visionKey";
 const getVisionKey=()=>localStorage.getItem(KEY_KEY)||"";
 const saveVisionKey=k=>localStorage.setItem(KEY_KEY,(k||"").trim());
+const aiProvider=k=>k.startsWith("sk-ant")?"claude":k.startsWith("sk-")?"openai":"gemini";
 
-function sliceCrop(canvas,region){
-  const sx=region.x*canvas.width, sy=region.y*canvas.height;
-  const sw=Math.max(1,region.w*canvas.width), sh=Math.max(1,region.h*canvas.height);
-  const out=makeCanvas(Math.round(sw*2),Math.round(sh*2));
-  out.getContext("2d").drawImage(canvas,sx,sy,sw,sh,0,0,out.width,out.height);
-  return out.toDataURL("image/png");
+function aiPrompt(){
+  let p=`You are reading a photographed DAILY MANPOWER REPORT form filled in by hand. `+
+    `Read every handwritten number carefully, exactly as written. Do not calculate, guess or "correct" totals — copy what is on the paper.\n\n`+
+    `The form has these sections, each with the listed rows and columns:\n`;
+  for(const sec of SECTIONS){
+    p+=`\nSection "${sec.section}" — ${sec.title}\nColumns (left to right): ${sec.cols.map(c=>c.key).join(" | ")}\nRows:\n`;
+    for(const row of sec.rows) p+=`- ${row.label}\n`;
+  }
+  p+=`\nReturn ONLY valid JSON (no markdown, no commentary) in exactly this shape:\n`+
+    `{"date":"<date written at the top of the form, or \\"\\">","sections":{"A":{"<ROW LABEL>":[v,v,v,v,v,v,v]},"B1":{...},"B2":{...},"C":{...}}}\n`+
+    `Rules:\n`+
+    `- Use the row labels EXACTLY as listed above.\n`+
+    `- Each row's array must have exactly as many values as that section has columns, in the listed column order (the last one is Total).\n`+
+    `- Each value is a non-negative integer, or null if the cell is blank or unreadable.\n`+
+    `- Include every listed row, even if all its cells are blank.`;
+  return p;
 }
-function visionWords(resp){
-  const out=[]; const page=resp.fullTextAnnotation && resp.fullTextAnnotation.pages && resp.fullTextAnnotation.pages[0];
-  if(!page) return out;
-  for(const block of page.blocks||[])
-    for(const para of block.paragraphs||[])
-      for(const word of para.words||[]){
-        const text=(word.symbols||[]).map(s=>s.text).join("");
-        const vs=(word.boundingBox&&word.boundingBox.vertices)||[];
-        if(!vs.length||!text) continue;
-        const xs=vs.map(v=>v.x||0), ys=vs.map(v=>v.y||0);
-        out.push({ text, conf:Math.round((word.confidence||0)*100),
-          cx:(Math.min(...xs)+Math.max(...xs))/2, cy:(Math.min(...ys)+Math.max(...ys))/2 });
-      }
-  return out;
+
+async function callGemini(key,b64,mime,prompt,model){
+  model=model||"gemini-2.5-flash";
+  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:mime,data:b64}},{text:prompt}]}],
+      generationConfig:{temperature:0,maxOutputTokens:8192}})
+  });
+  if(res.status===404 && model!=="gemini-2.0-flash") return callGemini(key,b64,mime,prompt,"gemini-2.0-flash");
+  if(!res.ok) throw new Error("Gemini "+res.status+": "+(await res.text()).slice(0,200));
+  const j=await res.json();
+  const parts=(j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts)||[];
+  return parts.map(x=>x.text||"").join("");
 }
-async function extractAllVision(imageSrc, fields, key, onProgress){
-  const img=await loadImage(imageSrc);
-  const W=img.naturalWidth, H=img.naturalHeight;
-  const base=makeCanvas(W,H); base.getContext("2d").drawImage(img,0,0);
-  const b64=(imageSrc.split(",")[1]) || base.toDataURL("image/png").split(",")[1];
-  onProgress&&onProgress(5,100);
-  const res=await fetch("https://vision.googleapis.com/v1/images:annotate?key="+encodeURIComponent(key),{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({requests:[{image:{content:b64},features:[{type:"DOCUMENT_TEXT_DETECTION"}]}]})
+async function callClaude(key,b64,mime,prompt){
+  const res=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({model:"claude-fable-5",max_tokens:8000,
+      messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:mime,data:b64}},{type:"text",text:prompt}]}]})
   });
-  if(!res.ok){ const t=await res.text(); throw new Error("Vision API "+res.status+": "+t.slice(0,160)); }
-  const data=await res.json();
-  const resp=(data.responses&&data.responses[0])||{};
-  if(resp.error) throw new Error("Vision: "+resp.error.message);
-  onProgress&&onProgress(60,100);
-  const words=visionWords(resp).map(w=>({...w,nx:w.cx/W,ny:w.cy/H}));
-  const results=fields.map(f=>{
-    const inside=words.filter(w=> w.nx>=f.region.x && w.nx<=f.region.x+f.region.w && w.ny>=f.region.y && w.ny<=f.region.y+f.region.h);
-    inside.sort((a,b)=>a.cx-b.cx);
-    let value=inside.map(w=>w.text).join("").trim();
-    if(f.numeric) value=cleanNumeric(value);
-    const conf=inside.length?Math.round(inside.reduce((s,w)=>s+w.conf,0)/inside.length):0;
-    return {id:f.id,value,confidence:conf,edited:false,crop:sliceCrop(base,f.region)};
+  if(!res.ok) throw new Error("Claude "+res.status+": "+(await res.text()).slice(0,200));
+  const j=await res.json();
+  return (j.content||[]).map(c=>c.text||"").join("");
+}
+async function callOpenAI(key,dataUrl,prompt){
+  const res=await fetch("https://api.openai.com/v1/chat/completions",{
+    method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+key},
+    body:JSON.stringify({model:"gpt-4o",temperature:0,max_tokens:8000,
+      messages:[{role:"user",content:[{type:"image_url",image_url:{url:dataUrl}},{type:"text",text:prompt}]}]})
   });
-  onProgress&&onProgress(100,100);
+  if(!res.ok) throw new Error("OpenAI "+res.status+": "+(await res.text()).slice(0,200));
+  const j=await res.json();
+  return (j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||"";
+}
+
+function parseAIJson(text){
+  const s=text.indexOf("{"), e=text.lastIndexOf("}");
+  if(s<0||e<=s) throw new Error("The AI did not return readable JSON. Try again.");
+  return JSON.parse(text.slice(s,e+1));
+}
+
+/* turn the AI's JSON into one result per field, matching rows by label */
+function aiToResults(data){
+  const normL=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+  const results=[];
+  results.push({id:"HDR.DATE",value:data.date?String(data.date):"",confidence:data.date?95:0,edited:false});
+  for(const sec of SECTIONS){
+    const rows=(data.sections&&data.sections[sec.section])||{};
+    const keys=Object.keys(rows);
+    for(const row of sec.rows){
+      const k=keys.find(x=>normL(x)===normL(row.label))||keys.find(x=>normL(x).includes(normL(row.label))||normL(row.label).includes(normL(x)));
+      const vals=(k?rows[k]:[])||[];
+      sec.cols.forEach((col,i)=>{
+        const v=vals[i];
+        const value=(v===null||v===undefined||v==="")?"":String(v).replace(/[^0-9]/g,"");
+        results.push({id:`${sec.section}.${slug(row.label)}.${slug(col.key)}`,value,confidence:value?95:0,edited:false});
+      });
+    }
+  }
   return results;
+}
+
+async function extractAI(imageDataUrl,key,onProgress){
+  const mime=(imageDataUrl.match(/^data:([^;]+)/)||[])[1]||"image/png";
+  const b64=imageDataUrl.split(",")[1];
+  const prompt=aiPrompt();
+  onProgress&&onProgress(15);
+  const prov=aiProvider(key);
+  let text;
+  if(prov==="gemini") text=await callGemini(key,b64,mime,prompt);
+  else if(prov==="claude") text=await callClaude(key,b64,mime,prompt);
+  else text=await callOpenAI(key,imageDataUrl,prompt);
+  onProgress&&onProgress(85);
+  const out=aiToResults(parseAIJson(text));
+  onProgress&&onProgress(100);
+  return out;
 }
 
 /* ============================================================================
@@ -537,7 +451,6 @@ async function fillTemplate(templateBuffer, cellValues){
    ============================================================================ */
 const $=id=>document.getElementById(id);
 const state={ imageDataUrl:null, templateBuffer:null, fields:mappingWithOverrides(), values:{} };
-let calRect=null, calDragging=null;
 
 /* tabs */
 document.querySelectorAll(".tab-btn").forEach(b=>b.addEventListener("click",()=>{
@@ -562,7 +475,6 @@ function renderStepper(cur){
 function showStep(step){
   renderStepper(step==="review"?1:step==="download"?2:0);
   $("step-upload").classList.toggle("hidden",step!=="upload");
-  $("step-calibrate").classList.toggle("hidden",step!=="calibrate");
   $("step-review").classList.toggle("hidden",step!=="review");
   $("step-download").classList.toggle("hidden",step!=="download");
 }
@@ -625,69 +537,40 @@ $("templateInput").addEventListener("change",async e=>{
 /* vision key field */
 function refreshKeyStatus(){
   const k=getVisionKey();
-  $("keyStatus").textContent = k ? "✓ Vision active" : "basic reader";
-  $("keyStatus").className = "text-xs " + (k?"text-green-600":"text-slate-400");
+  const prov=k?(aiProvider(k)==="claude"?"Claude":aiProvider(k)==="openai"?"OpenAI":"Gemini"):null;
+  $("keyStatus").textContent = k ? `✓ ${prov} key saved` : "no key yet — required";
+  $("keyStatus").className = "text-xs " + (k?"text-green-600":"text-amber-600");
 }
 $("visionKey").value=getVisionKey();
 refreshKeyStatus();
 $("saveKey").addEventListener("click",()=>{ saveVisionKey($("visionKey").value); refreshKeyStatus(); });
 
-/* upload -> calibrate */
-$("extractBtn").addEventListener("click",()=>{ showStep("calibrate"); renderCalib(); });
-
-/* ---- calibration view ---- */
-function handleDot(c,x,y){
-  return `<div data-corner="${c}" class="cal-h absolute w-5 h-5 -ml-2.5 -mt-2.5 rounded-full bg-indigo-600 border-2 border-white shadow cursor-grab" style="left:${x*100}%;top:${y*100}%"></div>`;
-}
-function drawCalib(){
-  if(!calRect) return;
-  const layer=$("calibLayer"), r=calRect, show=$("showCells").checked;
-  const fields=calibrateFields(mappingWithOverrides(),r);
-  const cells = show ? fields.map(f=>`<div class="absolute" style="left:${f.region.x*100}%;top:${f.region.y*100}%;width:${f.region.w*100}%;height:${f.region.h*100}%;border:1px solid rgba(245,158,11,.8);background:rgba(251,191,36,.12)"></div>`).join("") : "";
-  const boxStyle=`left:${r.x0*100}%;top:${r.y0*100}%;width:${(r.x1-r.x0)*100}%;height:${(r.y1-r.y0)*100}%`;
-  layer.innerHTML = cells +
-    `<div class="absolute border-2 border-indigo-500/80 pointer-events-none" style="${boxStyle}"></div>` +
-    handleDot("tl",r.x0,r.y0)+handleDot("tr",r.x1,r.y0)+handleDot("bl",r.x0,r.y1)+handleDot("br",r.x1,r.y1);
-  layer.querySelectorAll(".cal-h").forEach(h=>h.addEventListener("pointerdown",e=>{
-    e.preventDefault(); calDragging=h.dataset.corner;
-  }));
-}
-function renderCalib(){
-  calRect=getTableRect();
-  const img=$("calibImg");
-  img.onload=drawCalib; img.src=state.imageDataUrl;
-  if(img.complete && img.naturalWidth) drawCalib();
-}
-window.addEventListener("pointermove",e=>{
-  if(!calDragging||!calRect) return;
-  const box=$("calibImg").getBoundingClientRect();
-  let fx=(e.clientX-box.left)/box.width, fy=(e.clientY-box.top)/box.height;
-  fx=Math.max(0,Math.min(1,fx)); fy=Math.max(0,Math.min(1,fy));
-  if(calDragging.includes("l")) calRect.x0=fx; else calRect.x1=fx;
-  if(calDragging[0]==="t") calRect.y0=fy; else calRect.y1=fy;
-  drawCalib();
-});
-window.addEventListener("pointerup",()=>{ if(calDragging){ saveTableRect(calRect); calDragging=null; } });
-$("showCells").addEventListener("change",drawCalib);
-$("calibReset").addEventListener("click",()=>{ calRect={...REF_TABLE}; saveTableRect(calRect); drawCalib(); });
-$("calibBack").addEventListener("click",()=>showStep("upload"));
-
-/* calibrate -> extract */
-$("calibExtractBtn").addEventListener("click",async()=>{
-  const fields=calibrateFields(mappingWithOverrides(),calRect);
-  state.fields=fields;
-  $("calibProgress").classList.remove("hidden");
-  $("calibExtractBtn").disabled=true; $("calibExtractBtn").textContent="Reading…";
+/* upload -> AI extract -> review */
+$("extractBtn").addEventListener("click",async()=>{
+  $("uploadError").textContent="";
+  const key=getVisionKey();
+  if(!key){
+    $("uploadError").textContent="Add an AI key first — the free Gemini key from aistudio.google.com/apikey works. Paste it above and press Save key.";
+    return;
+  }
+  state.fields=mappingWithOverrides();
+  $("progressWrap").classList.remove("hidden");
+  $("extractBtn").disabled=true; $("extractBtn").textContent="Reading…";
+  $("progressLabel").textContent="AI is reading the form…";
+  const setPct=p=>{ $("progressPct").textContent=p+"%"; $("progressBar").style.width=p+"%"; };
+  setPct(5);
+  // creep the bar while the AI call is in flight so it doesn't look stuck
+  let creep=5; const tick=setInterval(()=>{ if(creep<80){ creep+=2; setPct(creep); } },800);
   try{
-    const key=getVisionKey();
-    const onProg=(done,total)=>{ const pct=Math.round(done/total*100); $("calibPct").textContent=pct+"%"; $("calibBar").style.width=pct+"%"; };
-    const vals = key
-      ? await extractAllVision(state.imageDataUrl, fields, key, onProg)
-      : await extractAll(state.imageDataUrl, fields, onProg);
+    const vals=await extractAI(state.imageDataUrl,key,p=>{ creep=Math.max(creep,p); setPct(creep); });
     state.values={}; vals.forEach(v=>state.values[v.id]=v);
     renderReview(); showStep("review");
-  }catch(e){ alert(e.message||"OCR failed"); }
-  finally{ $("calibExtractBtn").disabled=false; $("calibExtractBtn").textContent="Extract values →"; $("calibProgress").classList.add("hidden"); }
+  }catch(e){ $("uploadError").textContent=e.message||"AI reading failed — try again."; }
+  finally{
+    clearInterval(tick);
+    $("extractBtn").disabled=false; $("extractBtn").textContent="Extract values →";
+    $("progressWrap").classList.add("hidden"); setPct(0);
+  }
 });
 
 /* review */
@@ -704,14 +587,12 @@ function renderReview(){
       <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead class="text-left text-slate-500 border-b"><tr>
           <th class="px-4 py-2 font-medium">Field</th><th class="px-4 py-2 font-medium">Cell</th>
-          <th class="px-4 py-2 font-medium">Crop</th>
           <th class="px-4 py-2 font-medium">Read</th><th class="px-4 py-2 font-medium">Value</th>
           <th class="px-4 py-2 font-medium">Conf.</th></tr></thead>
         <tbody>${fs.map(f=>{const v=state.values[f.id]||{value:"",confidence:0};return `
           <tr class="border-b last:border-0 hover:bg-slate-50">
             <td class="px-4 py-1.5">${f.rowLabel} <span class="text-slate-400">· ${f.column}</span></td>
             <td class="px-4 py-1.5 text-slate-400">${f.excelCell}</td>
-            <td class="px-4 py-1.5">${v.crop?`<img src="${v.crop}" class="h-7 w-auto rounded border border-slate-200 bg-white"/>`:"—"}</td>
             <td class="px-4 py-1.5 text-slate-500">${v.value||"—"}</td>
             <td class="px-4 py-1.5"><input data-fid="${f.id}" value="${v.value||""}" inputmode="${f.numeric?'numeric':'text'}" class="rev-input w-24 rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500"/></td>
             <td class="px-4 py-1.5"><span class="rounded-full px-2 py-0.5 text-xs ${confClass(v.confidence)}">${v.confidence}%</span></td>
