@@ -257,7 +257,7 @@ async function autoMapFromTemplate(buffer){
   }));
   grid.sort((a,b)=>a.r-b.r||a.c-b.c);
 
-  const cells={}; let count=0; const missing=[]; const layout={};
+  const cells={}; let count=0; const missing=[];
   let cursor=1; // sections appear top-to-bottom; never match behind the previous one
 
   for(const sec of SECTIONS){
@@ -296,18 +296,7 @@ async function autoMapFromTemplate(buffer){
       colFor[col.key]=c==null?labelCol+1+i:c;
     });
 
-    // 4) remember this section's REAL printed headers and row positions — the
-    //    AI is told these exact header strings and keys every value by them,
-    //    so a value can only ever land under the header it was read from
-    layout[sec.section]={
-      headers: headerCells
-        ? headerCells.map(h=>({text:h.raw||h.t,norm:h.t,col:h.c}))
-        : sec.cols.map(col=>({text:col.key,norm:norm(col.key),col:colFor[col.key]})),
-      rows:{}
-    };
-    for(const row of sec.rows){ const m=rowFor[row.label]; if(m) layout[sec.section].rows[row.label]=m.r; }
-
-    // 5) emit a cell for every field in this section
+    // 4) emit a cell for every field in this section
     for(const row of sec.rows){
       const m=rowFor[row.label]; if(!m) continue;
       for(const col of sec.cols){
@@ -325,7 +314,61 @@ async function autoMapFromTemplate(buffer){
   if(dateLbl && !(byRow[dateLbl.r]||[]).some(g=>g.c===dateLbl.c+1))
     cells["HDR.DATE"]=colLetter(dateLbl.c+1)+dateLbl.r;
 
+  const layout=detectLayout(grid,byRow);
   return {count,total,cells,missing,layout};
+}
+
+/* ---- fully template-driven layout ----------------------------------------
+   Sections, row labels AND column headers are read from the template itself
+   (the photo shares the same printed layout). Nothing is guessed:
+   - a section starts at a title cell like "( B2 ) Piece Rate"
+   - its header row is the row near the title with the most real header texts
+   - its rows are every labelled line below, exactly as printed
+   Every value can then only go to (its printed header's column × its printed
+   row label's row). Returns null if the template has no such titles, in which
+   case the built-in defaults are used. */
+function detectLayout(grid,byRow){
+  const lastRow=grid.length?grid[grid.length-1].r:0;
+  // a section title STARTS with its marker, e.g. "( B2 ) Piece Rate" — the
+  // anchor matters: row labels like "VED SERVICES (T)" must not count
+  const titles=grid.filter(g=>g.c<=2 && !/^total/i.test(g.raw)
+    && /^\s*\(\s*[A-Z]\d*\s*\)/.test(g.raw) && g.raw.replace(/\(.*?\)/,"").trim().length<40);
+  if(!titles.length) return null;
+  const secs=[];
+  for(let i=0;i<titles.length;i++){
+    const t=titles[i], end=(i+1<titles.length)?titles[i+1].r:lastRow+1;
+    // label column: where most of the block's lettered texts live (usually B)
+    const cnt={};
+    for(const g of grid) if(g.r>t.r&&g.r<end&&g.c<=4&&/[A-Za-z]/.test(g.raw)&&!/^total/i.test(g.raw)) cnt[g.c]=(cnt[g.c]||0)+1;
+    const labelCol=+(Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a])[0]||2);
+    // header row: near the title, the row with the most multi-character texts
+    // right of the label column (filters out decorative rows like S-H-I-F-T-S)
+    let hRow=null,hScore=0;
+    for(let r=t.r;r<Math.min(t.r+4,end);r++){
+      const s=(byRow[r]||[]).filter(g=>g.c>labelCol&&g.t.length>=2&&!/^total/i.test(g.raw)).length;
+      if(s>hScore){hScore=s;hRow=r;}
+    }
+    if(!hRow||hScore<4) continue;
+    const headers=(byRow[hRow]||[]).filter(g=>g.c>labelCol&&g.t).sort((a,b)=>a.c-b.c)
+      .map(g=>({text:g.raw,norm:g.t,col:g.c}));
+    // the Total header sometimes sits one row above (merged band layouts)
+    const maxCol=headers.length?headers[headers.length-1].col:labelCol;
+    const extra=(byRow[hRow-1]||[]).find(g=>/^total/i.test(g.raw)&&g.c>maxCol);
+    if(extra) headers.push({text:extra.raw,norm:extra.t,col:extra.c});
+    // rows: every labelled line between the header row and the next section,
+    // keeping the printed serial number (left of the label) as a locator
+    const rows=[];
+    for(let r=hRow+1;r<end;r++){
+      const lab=(byRow[r]||[]).find(g=>g.c===labelCol&&g.raw&&!/^total/i.test(g.raw));
+      if(!lab) continue;
+      const sr=(byRow[r]||[]).find(g=>g.c<labelCol&&/^\d+$/.test(g.raw));
+      rows.push({label:lab.raw,r,sr:sr?sr.raw:null});
+    }
+    if(!rows.length) continue;
+    const m=t.raw.match(/\(\s*([A-Z]\d*)\s*\)/);
+    secs.push({id:m?m[1]:String(secs.length+1),title:t.raw,headers,rows});
+  }
+  return secs.length?secs:null;
 }
 /* layout of the LAST loaded template (real headers + row numbers) — this is
    the single source of truth for where every value goes */
@@ -372,18 +415,28 @@ const aiProvider=k=>!k?"puter":k.startsWith("sk-ant")?"claude":k.startsWith("sk-
 
 function aiPrompt(layout){
   let p=`You are reading a photographed DAILY MANPOWER REPORT form filled in by hand. `+
-    `Read every handwritten number exactly as written. Do not calculate, guess or "correct" totals — copy what is on the paper.\n\n`+
-    `The form's printed table layout is described below. The column header strings are EXACTLY as printed on the form:\n`;
-  for(const sec of SECTIONS){
-    const lay=layout&&layout[sec.section];
-    const headers=(lay&&lay.headers&&lay.headers.length)?lay.headers.map(h=>h.text):sec.cols.map(c=>c.key);
-    p+=`\nSection "${sec.section}" — ${sec.title}\nColumn headers, left to right: ${headers.map(h=>`"${h}"`).join(", ")}\nRows:\n`;
-    for(const row of sec.rows) p+=`- ${row.label}\n`;
+    `Read every handwritten number exactly as written. Do not calculate, guess or "correct" totals — copy what is on the paper.\n\n`;
+  const secIds=[];
+  if(layout){
+    p+=`The table layout below was taken from the company's own Excel of this form, so it is EXACTLY what is printed on the photographed form — same sections, same column headers, same rows, same order. Rows are listed with their printed serial number (left margin of the form) where one exists, as "serial · label":\n`;
+    for(const sec of layout){
+      secIds.push(sec.id);
+      p+=`\nSection "${sec.id}" — ${sec.title}\nColumn headers, left to right: ${sec.headers.map(h=>`"${h.text}"`).join(", ")}\nRows:\n`;
+      for(const row of sec.rows) p+=`- ${row.sr?row.sr+" · ":""}${row.label}\n`;
+    }
+  }else{
+    p+=`The form has these sections, rows and columns:\n`;
+    for(const sec of SECTIONS){
+      secIds.push(sec.section);
+      p+=`\nSection "${sec.section}" — ${sec.title}\nColumn headers, left to right: ${sec.cols.map(c=>`"${c.key}"`).join(", ")}\nRows:\n`;
+      for(const row of sec.rows) p+=`- ${row.label}\n`;
+    }
   }
   p+=`\nReturn ONLY valid JSON (no markdown, no commentary) in exactly this shape:\n`+
-    `{"date":"<date written at the top of the form, or \\"\\">","sections":{"A":{"<ROW LABEL>":{"<COLUMN HEADER>":<integer or null>, …}},"B1":{…},"B2":{…},"C":{…}}}\n`+
+    `{"date":"<date written at the top of the form, or \\"\\">","sections":{${secIds.map(s=>`"${s}":{"<ROW LABEL>":{"<COLUMN HEADER>":<integer or null>, …}, …}`).join(",")}}}\n`+
     `COLUMN ACCURACY RULES — these matter most:\n`+
-    `- Work row by row. Within a row, walk the columns LEFT TO RIGHT and key each handwritten value by the printed header string directly ABOVE it.\n`+
+    `- Work row by row. Use the serial numbers in the form's left margin to locate each row. Key each row by its ROW LABEL exactly as listed (without the serial).\n`+
+    `- Within a row, walk the columns LEFT TO RIGHT and key each handwritten value by the printed header string directly ABOVE it.\n`+
     `- A blank cell is null. NEVER skip blanks and shift a value to a neighbouring column: if a row only has a number under the 3rd column, every other column of that row must be null.\n`+
     `- Before answering, re-check each row: the count of values+nulls must equal the number of columns, each under its own header.\n`+
     `- Use the row labels and column header strings EXACTLY as listed above — do not rename, translate or reorder them.\n`+
@@ -465,15 +518,13 @@ function dynamicFields(layout){
   if(!layout) return mappingWithOverrides();
   const fields=[{id:"HDR.DATE",section:"HDR",sectionTitle:"Header",rowLabel:"Report Date",
     column:"Date",excelCell:(getAuto()["HDR.DATE"]||"H2"),numeric:false,isTotal:false}];
-  for(const sec of SECTIONS){
-    const lay=layout[sec.section]; if(!lay) continue;
+  for(const sec of layout){
     for(const row of sec.rows){
-      const r=lay.rows[row.label]; if(!r) continue;
-      for(const h of lay.headers){
+      for(const h of sec.headers){
         fields.push({
-          id:`${sec.section}.${slug(row.label)}.${slug(h.text)||("col"+h.col)}`,
-          section:sec.section, sectionTitle:sec.title, rowLabel:row.label, column:h.text,
-          excelCell:colLetter(h.col)+r, numeric:true, isTotal:h.norm.includes("total")
+          id:`${sec.id}.${slug(row.label)||("r"+row.r)}.${slug(h.text)||("c"+h.col)}`,
+          section:sec.id, sectionTitle:sec.title, rowLabel:row.label, column:h.text,
+          excelCell:colLetter(h.col)+row.r, numeric:true, isTotal:h.norm.includes("total")
         });
       }
     }
@@ -576,6 +627,9 @@ async function fillTemplate(templateBuffer, cellValues){
     // cells that already hold a formula (e.g. the Total column) calculate
     // themselves — overwriting one corrupts Excel's shared formulas
     if(cell.type===ExcelJS.ValueType.Formula) continue;
+    // keep a "DATE :" label if the template's date cell carries one
+    let existing=""; try{ existing=String(cell.text||""); }catch(e){}
+    if(/date\s*:/i.test(existing) && !/date/i.test(String(raw))){ cell.value="DATE : "+raw; continue; }
     const num=Number(raw);
     cell.value=(!Number.isNaN(num) && /^[0-9]+(\.[0-9]+)?$/.test(String(raw).trim())) ? num : raw;
   }
@@ -640,12 +694,13 @@ async function tryBuiltinTemplate(){
     const sig=new Uint8Array(buf.slice(0,2));
     if(sig[0]!==0x50||sig[1]!==0x4B) return; // not a real .xlsx (e.g. a 404 page)
     const det=await autoMapFromTemplate(buf);
-    if(!det.count) return;
+    if(!det.count&&!det.layout) return;
     state.templateBuffer=buf;
     saveAuto(det.cells);
     templateLayout=det.layout;
     state.fields=dynamicFields(templateLayout);
-    $("templateStatus").textContent=`✓ company template loaded automatically (${det.count}/${det.total} cells) — upload a file only to use a different one`;
+    const nRows=templateLayout?templateLayout.reduce((s,x)=>s+x.rows.length,0):det.count;
+    $("templateStatus").textContent=`✓ company template loaded automatically (${templateLayout?templateLayout.length+" sections, "+nRows+" rows":det.count+"/"+det.total+" cells"}) — upload a file only to use a different one`;
     $("templateStatus").className="text-xs text-green-600";
     checkReady();
   }catch(e){ /* no built-in template — user uploads one */ }
@@ -681,9 +736,15 @@ $("templateInput").addEventListener("change",async e=>{
     saveAuto(det.cells);
     templateLayout=det.layout;
     state.fields=dynamicFields(templateLayout);
-    const warn=(det.missing&&det.missing.length)?` · not found: ${det.missing.join(" | ")}`:"";
-    $("templateStatus").textContent=`✓ ${f.name} — matched ${det.count}/${det.total} cells to your template${warn}`;
-    $("templateStatus").className="text-xs "+(warn?"text-amber-600":"text-green-600");
+    if(templateLayout){
+      const nRows=templateLayout.reduce((s,x)=>s+x.rows.length,0);
+      $("templateStatus").textContent=`✓ ${f.name} — read from your template: ${templateLayout.length} sections, ${nRows} rows, all headers`;
+      $("templateStatus").className="text-xs text-green-600";
+    }else{
+      const warn=(det.missing&&det.missing.length)?` · not found: ${det.missing.join(" | ")}`:"";
+      $("templateStatus").textContent=`✓ ${f.name} — matched ${det.count}/${det.total} cells to your template${warn}`;
+      $("templateStatus").className="text-xs "+(warn?"text-amber-600":"text-green-600");
+    }
   }catch(err){
     saveAuto({});
     $("templateStatus").textContent="✓ "+f.name+" — couldn't auto-read layout, using Admin defaults";
