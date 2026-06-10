@@ -339,10 +339,22 @@ async function downscale(dataUrl,maxDim=2000){
    Works with a Google Gemini key (AIza…), Claude key (sk-ant-…) or
    OpenAI key (sk-…). The key stays in localStorage.
    ============================================================================ */
+/* Paste your Gemini key between the quotes below before sharing the page and
+   nobody who opens it will ever see a key or sign-in. (In Google Cloud you can
+   restrict the key to this site's address so it's useless anywhere else.)
+   Alternatively share the page link with #k=YOUR_KEY appended — the key
+   installs itself into that person's browser on first open. */
+const BUILTIN_KEY="";
+
 const KEY_KEY="mpr.visionKey";
-const getVisionKey=()=>localStorage.getItem(KEY_KEY)||"";
+const getVisionKey=()=>localStorage.getItem(KEY_KEY)||BUILTIN_KEY||"";
 const saveVisionKey=k=>localStorage.setItem(KEY_KEY,(k||"").trim());
 const aiProvider=k=>!k?"puter":k.startsWith("sk-ant")?"claude":k.startsWith("sk-")?"openai":"gemini";
+/* one-time key install from a shared link: index.html#k=AIza… */
+(function(){
+  const m=location.hash.match(/[#&]k=([^&]+)/);
+  if(m){ saveVisionKey(decodeURIComponent(m[1])); history.replaceState(null,"",location.pathname+location.search); }
+})();
 
 function aiPrompt(){
   let p=`You are reading a photographed DAILY MANPOWER REPORT form filled in by hand. `+
@@ -362,14 +374,18 @@ function aiPrompt(){
   return p;
 }
 
-async function callGemini(key,b64,mime,prompt,model){
-  model=model||"gemini-2.5-flash";
+/* strongest model first for accuracy; fall through if unavailable/rate-limited */
+const GEMINI_MODELS=["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"];
+async function callGemini(key,b64,mime,prompt,mi){
+  mi=mi||0;
+  const model=GEMINI_MODELS[mi];
   const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,{
     method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:mime,data:b64}},{text:prompt}]}],
       generationConfig:{temperature:0,maxOutputTokens:8192}})
   });
-  if(res.status===404 && model!=="gemini-2.0-flash") return callGemini(key,b64,mime,prompt,"gemini-2.0-flash");
+  if([404,429,503].includes(res.status) && mi<GEMINI_MODELS.length-1)
+    return callGemini(key,b64,mime,prompt,mi+1);
   if(!res.ok) throw new Error("Gemini "+res.status+": "+(await res.text()).slice(0,200));
   const j=await res.json();
   const parts=(j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts)||[];
@@ -443,6 +459,27 @@ function aiToResults(data){
     }
   }
   return results;
+}
+
+/* accuracy cross-check: a row's shift values must add up to its Total column.
+   Rows that don't add up get their confidence dropped so they show red in the
+   review — that's where a reading mistake is hiding, check those first. */
+function flagMismatches(vals){
+  const map={}; vals.forEach(v=>map[v.id]=v);
+  let bad=0;
+  for(const sec of SECTIONS) for(const row of sec.rows){
+    const ids=sec.cols.map(c=>`${sec.section}.${slug(row.label)}.${slug(c.key)}`);
+    const tot=map[ids[ids.length-1]];
+    if(!tot||tot.value==="") continue;
+    const parts=ids.slice(0,-1).map(i=>map[i]).filter(v=>v&&v.value!=="");
+    if(!parts.length) continue;
+    const sum=parts.reduce((s,v)=>s+Number(v.value),0);
+    if(Number(tot.value)!==sum){
+      bad++;
+      ids.forEach(i=>{ if(map[i]&&map[i].value!=="") map[i].confidence=Math.min(map[i].confidence,45); });
+    }
+  }
+  return bad;
 }
 
 async function extractAI(imageDataUrl,key,onProgress){
@@ -531,6 +568,25 @@ async function pdfFirstPage(file){
 
 function checkReady(){ $("extractBtn").disabled = !(state.imageDataUrl && state.templateBuffer); }
 
+/* if a template.xlsx sits next to this page (committed to the repo), load it
+   automatically so the only thing anyone has to upload is the photo */
+async function tryBuiltinTemplate(){
+  try{
+    const res=await fetch("template.xlsx",{cache:"no-store"});
+    if(!res.ok) return;
+    const buf=await res.arrayBuffer();
+    const sig=new Uint8Array(buf.slice(0,2));
+    if(sig[0]!==0x50||sig[1]!==0x4B) return; // not a real .xlsx (e.g. a 404 page)
+    const det=await autoMapFromTemplate(buf);
+    if(!det.count) return;
+    state.templateBuffer=buf;
+    saveAuto(det.cells); state.fields=mappingWithOverrides();
+    $("templateStatus").textContent=`✓ company template loaded automatically (${det.count}/${det.total} cells) — upload a file only to use a different one`;
+    $("templateStatus").className="text-xs text-green-600";
+    checkReady();
+  }catch(e){ /* no built-in template — user uploads one */ }
+}
+
 async function handleImage(file){
   $("uploadError").textContent="";
   try{
@@ -596,6 +652,7 @@ $("extractBtn").addEventListener("click",async()=>{
   let creep=5; const tick=setInterval(()=>{ if(creep<80){ creep+=2; setPct(creep); } },800);
   try{
     const vals=await extractAI(state.imageDataUrl,key,p=>{ creep=Math.max(creep,p); setPct(creep); });
+    state.mismatches=flagMismatches(vals);
     state.values={}; vals.forEach(v=>state.values[v.id]=v);
     renderReview(); showStep("review");
   }catch(e){ $("uploadError").textContent=e.message||"AI reading failed — try again."; }
@@ -613,7 +670,9 @@ function renderReview(){
   const groups={};
   state.fields.forEach(f=>(groups[f.sectionTitle]=groups[f.sectionTitle]||[]).push(f));
   const filled=Object.values(state.values).filter(v=>v.value).length;
-  $("reviewSummary").textContent=`${filled} of ${state.fields.length} cells have values. Low-confidence cells are red — fix anything wrong.`;
+  $("reviewSummary").textContent = state.mismatches
+    ? `${filled} of ${state.fields.length} cells have values. ⚠️ ${state.mismatches} row(s) don't add up to their Total — they're marked red, check those first.`
+    : `${filled} of ${state.fields.length} cells have values. Every row adds up to its Total ✓ — quick glance and generate.`;
   $("reviewTables").innerHTML=Object.entries(groups).map(([title,fs])=>`
     <div class="card overflow-hidden">
       <div class="bg-slate-50 px-4 py-2 font-semibold border-b">${title}</div>
@@ -684,6 +743,7 @@ $("resetMapping").addEventListener("click",()=>{ saveOverrides({}); state.fields
 
 /* init */
 showStep("upload");
+tryBuiltinTemplate();
 </script>
 </body>
 </html>
