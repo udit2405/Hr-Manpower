@@ -9,6 +9,8 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <!-- ExcelJS (browser Excel writing) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<!-- Puter.js (free AI without an API key) -->
+<script src="https://js.puter.com/v2/"></script>
 <!-- pdf.js (first page of PDF -> image) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
@@ -76,8 +78,8 @@
 
       <div class="card p-4 mt-4 flex items-center gap-3 flex-wrap">
         <div class="grow min-w-[220px]">
-          <p class="font-medium text-sm">🤖 AI key <span class="text-slate-400 font-normal">— reads the handwriting, like ChatGPT does</span></p>
-          <p class="text-xs text-slate-400">Paste a <a href="https://aistudio.google.com/apikey" target="_blank" class="text-indigo-700 underline">free Google Gemini key</a> (starts with AIza), or a Claude key (sk-ant-…) or OpenAI key (sk-…). Stored only in this browser and sent only to that AI provider.</p>
+          <p class="font-medium text-sm">🤖 AI key <span class="text-slate-400 font-normal">— optional</span></p>
+          <p class="text-xs text-slate-400">Leave empty to use the built-in <b>free AI</b> (a one-time free sign-in window appears on first extract). Or paste your own key: <a href="https://aistudio.google.com/apikey" target="_blank" class="text-indigo-700 underline">free Gemini key</a> (AIza…), Claude (sk-ant-…) or OpenAI (sk-…). Keys stay in this browser only.</p>
         </div>
         <input id="visionKey" type="password" placeholder="AIza… / sk-ant-… / sk-…" class="text-sm border border-slate-300 rounded-lg px-2 py-1 w-56" />
         <button id="saveKey" class="btn btn-ghost text-sm">Save key</button>
@@ -316,9 +318,19 @@ async function autoMapFromTemplate(buffer){
 }
 
 /* ============================================================================
-   2) CANVAS HELPER (PDF rendering)
+   2) CANVAS HELPERS (PDF rendering + image downscale)
    ============================================================================ */
 function makeCanvas(w,h){ const c=document.createElement("canvas"); c.width=w; c.height=h; return c; }
+function loadImage(src){ return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=src; }); }
+/* phone photos are huge; AI providers don't need more than ~2000px */
+async function downscale(dataUrl,maxDim=2000){
+  const img=await loadImage(dataUrl);
+  const w=img.naturalWidth,h=img.naturalHeight,s=Math.min(1,maxDim/Math.max(w,h));
+  if(s>=1 && dataUrl.length<4000000) return dataUrl;
+  const c=makeCanvas(Math.max(1,Math.round(w*s)),Math.max(1,Math.round(h*s)));
+  c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+  return c.toDataURL("image/jpeg",0.92);
+}
 
 /* ============================================================================
    3) AI EXTRACTION — send the whole photo to a vision AI model with the known
@@ -330,7 +342,7 @@ function makeCanvas(w,h){ const c=document.createElement("canvas"); c.width=w; c
 const KEY_KEY="mpr.visionKey";
 const getVisionKey=()=>localStorage.getItem(KEY_KEY)||"";
 const saveVisionKey=k=>localStorage.setItem(KEY_KEY,(k||"").trim());
-const aiProvider=k=>k.startsWith("sk-ant")?"claude":k.startsWith("sk-")?"openai":"gemini";
+const aiProvider=k=>!k?"puter":k.startsWith("sk-ant")?"claude":k.startsWith("sk-")?"openai":"gemini";
 
 function aiPrompt(){
   let p=`You are reading a photographed DAILY MANPOWER REPORT form filled in by hand. `+
@@ -386,6 +398,26 @@ async function callOpenAI(key,dataUrl,prompt){
   return (j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||"";
 }
 
+/* free path — Puter.js pays for the AI; the user just signs in once (free) */
+function puterText(r){
+  if(r==null) return "";
+  if(typeof r==="string") return r;
+  const c=r.message&&r.message.content;
+  if(typeof c==="string") return c;
+  if(Array.isArray(c)) return c.map(x=>(x&&x.text)||"").join("");
+  return String(r);
+}
+async function callPuter(dataUrl,prompt){
+  if(typeof puter==="undefined"||!puter.ai)
+    throw new Error("The free AI couldn't load — check your internet connection, or paste an API key above.");
+  let resp;
+  try{ resp=await puter.ai.chat(prompt,dataUrl,{model:"gpt-4o"}); }
+  catch(e){ resp=await puter.ai.chat(prompt,dataUrl); } // model name unavailable -> provider default
+  const text=puterText(resp);
+  if(!text) throw new Error("The free AI returned nothing — please try again.");
+  return text;
+}
+
 function parseAIJson(text){
   const s=text.indexOf("{"), e=text.lastIndexOf("}");
   if(s<0||e<=s) throw new Error("The AI did not return readable JSON. Try again.");
@@ -414,15 +446,17 @@ function aiToResults(data){
 }
 
 async function extractAI(imageDataUrl,key,onProgress){
-  const mime=(imageDataUrl.match(/^data:([^;]+)/)||[])[1]||"image/png";
-  const b64=imageDataUrl.split(",")[1];
+  const dataUrl=await downscale(imageDataUrl);
+  const mime=(dataUrl.match(/^data:([^;]+)/)||[])[1]||"image/png";
+  const b64=dataUrl.split(",")[1];
   const prompt=aiPrompt();
   onProgress&&onProgress(15);
   const prov=aiProvider(key);
   let text;
-  if(prov==="gemini") text=await callGemini(key,b64,mime,prompt);
+  if(prov==="puter") text=await callPuter(dataUrl,prompt);
+  else if(prov==="gemini") text=await callGemini(key,b64,mime,prompt);
   else if(prov==="claude") text=await callClaude(key,b64,mime,prompt);
-  else text=await callOpenAI(key,imageDataUrl,prompt);
+  else text=await callOpenAI(key,dataUrl,prompt);
   onProgress&&onProgress(85);
   const out=aiToResults(parseAIJson(text));
   onProgress&&onProgress(100);
@@ -538,8 +572,8 @@ $("templateInput").addEventListener("change",async e=>{
 function refreshKeyStatus(){
   const k=getVisionKey();
   const prov=k?(aiProvider(k)==="claude"?"Claude":aiProvider(k)==="openai"?"OpenAI":"Gemini"):null;
-  $("keyStatus").textContent = k ? `✓ ${prov} key saved` : "no key yet — required";
-  $("keyStatus").className = "text-xs " + (k?"text-green-600":"text-amber-600");
+  $("keyStatus").textContent = k ? `✓ ${prov} key saved` : "✓ using free AI — no key needed";
+  $("keyStatus").className = "text-xs text-green-600";
 }
 $("visionKey").value=getVisionKey();
 refreshKeyStatus();
@@ -549,14 +583,10 @@ $("saveKey").addEventListener("click",()=>{ saveVisionKey($("visionKey").value);
 $("extractBtn").addEventListener("click",async()=>{
   $("uploadError").textContent="";
   const key=getVisionKey();
-  if(!key){
-    $("uploadError").textContent="Add an AI key first — the free Gemini key from aistudio.google.com/apikey works. Paste it above and press Save key.";
-    return;
-  }
   state.fields=mappingWithOverrides();
   $("progressWrap").classList.remove("hidden");
   $("extractBtn").disabled=true; $("extractBtn").textContent="Reading…";
-  $("progressLabel").textContent="AI is reading the form…";
+  $("progressLabel").textContent=key?"AI is reading the form…":"Free AI is reading the form… (a one-time sign-in window may pop up — it's free)";
   const setPct=p=>{ $("progressPct").textContent=p+"%"; $("progressBar").style.width=p+"%"; };
   setPct(5);
   // creep the bar while the AI call is in flight so it doesn't look stuck
