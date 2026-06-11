@@ -34,6 +34,9 @@ rows → Generate Excel → Download. No sign-ups, no keys, nothing to type.
 (Alternative: paste the key into the `BUILTIN_KEY` line near the top of the
 script in `index.html` — then even the first link is the plain one.)
 
+There is no sign-in and no popup anywhere — once the link is opened once,
+the page is permanently connected on that browser.
+
 ## Accuracy
 
 Uses Gemini 2.5 Pro for reading. Every row is cross-checked against its Total

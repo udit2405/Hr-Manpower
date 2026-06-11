@@ -9,8 +9,6 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <!-- ExcelJS (browser Excel writing) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
-<!-- Puter.js (free AI without an API key) -->
-<script src="https://js.puter.com/v2/"></script>
 <!-- pdf.js (first page of PDF -> image) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
@@ -87,10 +85,11 @@
         <span id="templateStatus" class="text-xs text-slate-400"></span>
       </div>
 
-      <div class="card p-4 mt-4 flex items-center gap-3 flex-wrap">
+      <!-- shown only when this browser has no AI key installed yet -->
+      <div id="keyCard" class="card p-4 mt-4 flex items-center gap-3 flex-wrap hidden">
         <div class="grow min-w-[220px]">
-          <p class="font-medium text-sm">🤖 AI key <span class="text-slate-400 font-normal">— optional</span></p>
-          <p class="text-xs text-slate-400">Leave empty to use the built-in <b>free AI</b> (a one-time free sign-in window appears on first extract). Or paste your own key: <a href="https://aistudio.google.com/apikey" target="_blank" class="brand-link">free Gemini key</a> (AIza…), Claude (sk-ant-…) or OpenAI (sk-…). Keys stay in this browser only.</p>
+          <p class="font-medium text-sm">🤖 One-time setup needed</p>
+          <p class="text-xs text-slate-400">This browser isn't connected to the AI yet. Open this page once through the setup link you were sent, or paste a <a href="https://aistudio.google.com/apikey" target="_blank" class="brand-link">free Gemini key</a> (AIza…) below. It's remembered after that.</p>
         </div>
         <input id="visionKey" type="password" placeholder="AIza… / sk-ant-… / sk-…" class="text-sm border border-slate-300 rounded-lg px-2 py-1 w-56" />
         <button id="saveKey" class="btn btn-ghost text-sm">Save key</button>
@@ -417,7 +416,7 @@ const BUILTIN_KEY="";
 const KEY_KEY="mpr.visionKey";
 const getVisionKey=()=>localStorage.getItem(KEY_KEY)||BUILTIN_KEY||"";
 const saveVisionKey=k=>localStorage.setItem(KEY_KEY,(k||"").trim());
-const aiProvider=k=>!k?"puter":k.startsWith("sk-ant")?"claude":k.startsWith("sk-")?"openai":"gemini";
+const aiProvider=k=>k.startsWith("sk-ant")?"claude":k.startsWith("sk-")?"openai":"gemini";
 /* one-time key install from a shared link: index.html#k=AIza… */
 (function(){
   const m=location.hash.match(/[#&]k=([^&]+)/);
@@ -493,26 +492,6 @@ async function callOpenAI(key,dataUrl,prompt){
   if(!res.ok) throw new Error("OpenAI "+res.status+": "+(await res.text()).slice(0,200));
   const j=await res.json();
   return (j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||"";
-}
-
-/* free path — Puter.js pays for the AI; the user just signs in once (free) */
-function puterText(r){
-  if(r==null) return "";
-  if(typeof r==="string") return r;
-  const c=r.message&&r.message.content;
-  if(typeof c==="string") return c;
-  if(Array.isArray(c)) return c.map(x=>(x&&x.text)||"").join("");
-  return String(r);
-}
-async function callPuter(dataUrl,prompt){
-  if(typeof puter==="undefined"||!puter.ai)
-    throw new Error("The free AI couldn't load — check your internet connection, or paste an API key above.");
-  let resp;
-  try{ resp=await puter.ai.chat(prompt,dataUrl,{model:"gpt-4o"}); }
-  catch(e){ resp=await puter.ai.chat(prompt,dataUrl); } // model name unavailable -> provider default
-  const text=puterText(resp);
-  if(!text) throw new Error("The free AI returned nothing — please try again.");
-  return text;
 }
 
 function parseAIJson(text){
@@ -614,8 +593,7 @@ async function extractAI(imageDataUrl,key,fields,onProgress){
   onProgress&&onProgress(15);
   const prov=aiProvider(key);
   let text;
-  if(prov==="puter") text=await callPuter(dataUrl,prompt);
-  else if(prov==="gemini") text=await callGemini(key,b64,mime,prompt);
+  if(prov==="gemini") text=await callGemini(key,b64,mime,prompt);
   else if(prov==="claude") text=await callClaude(key,b64,mime,prompt);
   else text=await callOpenAI(key,dataUrl,prompt);
   onProgress&&onProgress(85);
@@ -767,8 +745,10 @@ $("templateInput").addEventListener("change",async e=>{
 /* vision key field */
 function refreshKeyStatus(){
   const k=getVisionKey();
+  // connected: hide the whole setup card — the page just works
+  $("keyCard").classList.toggle("hidden",!!k);
   const prov=k?(aiProvider(k)==="claude"?"Claude":aiProvider(k)==="openai"?"OpenAI":"Gemini"):null;
-  $("keyStatus").textContent = k ? `✓ ${prov} key saved` : "✓ using free AI — no key needed";
+  $("keyStatus").textContent = k ? `✓ ${prov} connected` : "";
   $("keyStatus").className = "text-xs text-green-600";
 }
 $("visionKey").value=getVisionKey();
@@ -779,10 +759,15 @@ $("saveKey").addEventListener("click",()=>{ saveVisionKey($("visionKey").value);
 $("extractBtn").addEventListener("click",async()=>{
   $("uploadError").textContent="";
   const key=getVisionKey();
+  if(!key){
+    $("keyCard").classList.remove("hidden");
+    $("uploadError").textContent="This browser isn't connected to the AI yet — open the page once via the setup link you were sent (or do the one-time setup above), then it works forever.";
+    return;
+  }
   state.fields=dynamicFields(templateLayout);
   $("progressWrap").classList.remove("hidden");
   $("extractBtn").disabled=true; $("extractBtn").textContent="Reading…";
-  $("progressLabel").textContent=key?"AI is reading the form…":"Free AI is reading the form… (a one-time sign-in window may pop up — it's free)";
+  $("progressLabel").textContent="AI is reading the form…";
   const setPct=p=>{ $("progressPct").textContent=p+"%"; $("progressBar").style.width=p+"%"; };
   setPct(5);
   // creep the bar while the AI call is in flight so it doesn't look stuck
