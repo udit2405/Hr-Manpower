@@ -85,11 +85,30 @@
         <span id="templateStatus" class="text-xs text-slate-400"></span>
       </div>
 
+      <!-- ChatGPT mode: works with a normal ChatGPT account, no key, no signup -->
+      <div id="gptCard" class="card p-4 mt-4 hidden">
+        <p class="font-medium text-sm mb-1">💬 Use ChatGPT to read the form <span class="text-slate-400 font-normal">— no key, no new account</span></p>
+        <ol class="text-xs text-slate-500 list-decimal ml-4 space-y-1 mb-3">
+          <li>Click <b>Copy instructions</b>, then open <a href="https://chatgpt.com" target="_blank" class="brand-link">ChatGPT</a>.</li>
+          <li>In ChatGPT: attach the photo of the form 📎, paste the instructions, send.</li>
+          <li>Copy ChatGPT's whole answer and paste it in the box below.</li>
+        </ol>
+        <div class="flex gap-3 flex-wrap items-start">
+          <button id="copyPromptBtn" class="btn btn-primary text-sm">📋 Copy instructions</button>
+          <span id="copyMsg" class="text-xs text-green-600 self-center"></span>
+        </div>
+        <textarea id="gptAnswer" rows="4" placeholder="Paste ChatGPT's answer here…" class="mt-3 w-full text-xs border border-slate-300 rounded-lg p-2 outline-none"></textarea>
+        <div class="mt-2 flex gap-3 items-center">
+          <button id="useAnswerBtn" class="btn btn-primary text-sm">Use this answer →</button>
+          <span id="gptError" class="text-xs text-red-600"></span>
+        </div>
+      </div>
+
       <!-- shown only when this browser has no AI key installed yet -->
       <div id="keyCard" class="card p-4 mt-4 flex items-center gap-3 flex-wrap hidden">
         <div class="grow min-w-[220px]">
-          <p class="font-medium text-sm">🤖 One-time setup needed</p>
-          <p class="text-xs text-slate-400">This browser isn't connected to the AI yet. Open this page once through the setup link you were sent, or paste a <a href="https://aistudio.google.com/apikey" target="_blank" class="brand-link">free Gemini key</a> (AIza…) below. It's remembered after that.</p>
+          <p class="font-medium text-sm">⚡ Optional: make it one-click</p>
+          <p class="text-xs text-slate-400">Skip the ChatGPT steps entirely: open this page once through a setup link, or paste a <a href="https://aistudio.google.com/apikey" target="_blank" class="brand-link">free Gemini key</a> (AIza…) below — then the Extract button reads the photo directly.</p>
         </div>
         <input id="visionKey" type="password" placeholder="AIza… / sk-ant-… / sk-…" class="text-sm border border-slate-300 rounded-lg px-2 py-1 w-56" />
         <button id="saveKey" class="btn btn-ghost text-sm">Save key</button>
@@ -745,12 +764,39 @@ $("templateInput").addEventListener("change",async e=>{
 /* vision key field */
 function refreshKeyStatus(){
   const k=getVisionKey();
-  // connected: hide the whole setup card — the page just works
+  // key connected: page is one-click, hide both helper cards
   $("keyCard").classList.toggle("hidden",!!k);
+  $("gptCard").classList.toggle("hidden",!!k);
   const prov=k?(aiProvider(k)==="claude"?"Claude":aiProvider(k)==="openai"?"OpenAI":"Gemini"):null;
   $("keyStatus").textContent = k ? `✓ ${prov} connected` : "";
   $("keyStatus").className = "text-xs text-green-600";
 }
+
+/* ---- ChatGPT mode: copy the reading instructions, paste back the answer ---- */
+$("copyPromptBtn").addEventListener("click",async()=>{
+  const prompt=aiPrompt(templateLayout);
+  try{ await navigator.clipboard.writeText(prompt); $("copyMsg").textContent="✓ copied — now paste it to ChatGPT with the photo attached"; }
+  catch(e){
+    const ta=document.createElement("textarea"); ta.value=prompt; document.body.appendChild(ta);
+    ta.select(); document.execCommand("copy"); ta.remove();
+    $("copyMsg").textContent="✓ copied — now paste it to ChatGPT with the photo attached";
+  }
+  setTimeout(()=>$("copyMsg").textContent="",6000);
+});
+$("useAnswerBtn").addEventListener("click",()=>{
+  $("gptError").textContent="";
+  const raw=$("gptAnswer").value.trim();
+  if(!raw){ $("gptError").textContent="Paste ChatGPT's answer first."; return; }
+  if(!state.templateBuffer){ $("gptError").textContent="Template not loaded yet — wait a second and try again."; return; }
+  try{
+    state.fields=dynamicFields(templateLayout);
+    const vals=aiToResults(parseAIJson(raw),state.fields);
+    if(!vals.some(v=>v.value)) throw new Error("No values found in the pasted answer — copy ChatGPT's WHOLE reply and paste it here.");
+    state.mismatches=flagMismatches(vals,state.fields);
+    state.values={}; vals.forEach(v=>state.values[v.id]=v);
+    renderReview(); showStep("review");
+  }catch(e){ $("gptError").textContent=e.message||"Could not read that answer — paste ChatGPT's whole reply."; }
+});
 $("visionKey").value=getVisionKey();
 refreshKeyStatus();
 $("saveKey").addEventListener("click",()=>{ saveVisionKey($("visionKey").value); refreshKeyStatus(); });
@@ -760,8 +806,9 @@ $("extractBtn").addEventListener("click",async()=>{
   $("uploadError").textContent="";
   const key=getVisionKey();
   if(!key){
-    $("keyCard").classList.remove("hidden");
-    $("uploadError").textContent="This browser isn't connected to the AI yet — open the page once via the setup link you were sent (or do the one-time setup above), then it works forever.";
+    $("gptCard").classList.remove("hidden");
+    $("uploadError").textContent="Direct reading needs the one-time setup — but you can use the ChatGPT box above right now: copy the instructions, give them to ChatGPT with the photo, and paste its answer back.";
+    $("gptCard").scrollIntoView({behavior:"smooth",block:"center"});
     return;
   }
   state.fields=dynamicFields(templateLayout);
@@ -788,7 +835,9 @@ $("extractBtn").addEventListener("click",async()=>{
 /* review */
 function confClass(c){ return c>=80?"bg-green-100 text-green-700":c>=55?"bg-amber-100 text-amber-700":"bg-red-100 text-red-700"; }
 function renderReview(){
-  $("reviewImage").src=state.imageDataUrl;
+  // in ChatGPT mode the photo may never have been uploaded here
+  if(state.imageDataUrl) $("reviewImage").src=state.imageDataUrl;
+  $("reviewImage").parentElement.classList.toggle("hidden",!state.imageDataUrl);
   const groups={};
   state.fields.forEach(f=>(groups[f.sectionTitle]=groups[f.sectionTitle]||[]).push(f));
   const filled=Object.values(state.values).filter(v=>v.value).length;

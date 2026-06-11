@@ -7,7 +7,14 @@ fills your Excel template — values land in the right cells, totals calculate
 themselves, and any row whose numbers don't add up to its Total is flagged red
 for a quick check before download.
 
-## One-time setup (you, ~3 minutes)
+## Zero-setup option: ChatGPT mode
+
+No key, no new account. On the page: click **Copy instructions** → open
+chatgpt.com → attach the form photo, paste, send → copy ChatGPT's whole
+reply → paste it back on the page → review → download the filled Excel.
+Works with any normal (even free) ChatGPT account.
+
+## One-time setup for one-click mode (you, ~3 minutes)
 
 1. **Get a free AI key** — go to https://aistudio.google.com/apikey (sign in
    with your normal Google account), click *Create API key*, copy it (starts
