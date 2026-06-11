@@ -15,27 +15,38 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
 <style>
-  body { background:#f6f7fb; color:#1f2433; }
-  .card { background:#fff; border:1px solid #e2e8f0; border-radius:1rem; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  :root { --brand:#ED1B24; --brand-dark:#C2151C; --brand-soft:#FDECEC; }
+  body { background:#f8f7f7; color:#1f2433; }
+  .card { background:#fff; border:1px solid #e7e5e4; border-radius:1rem; box-shadow:0 1px 2px rgba(0,0,0,.04); }
   .btn { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; border-radius:.75rem; padding:.6rem 1rem; font-weight:500; transition:.15s; cursor:pointer; }
-  .btn-primary { background:#364fc7; color:#fff; }
-  .btn-primary:hover { background:#2f44ad; }
+  .btn-primary { background:var(--brand); color:#fff; }
+  .btn-primary:hover { background:var(--brand-dark); }
   .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
-  .btn-ghost { background:#f1f5f9; color:#334155; }
-  .btn-ghost:hover { background:#e2e8f0; }
+  .btn-ghost { background:#f5f5f4; color:#334155; }
+  .btn-ghost:hover { background:#e7e5e4; }
   .hidden { display:none; }
   input.cell { width:5rem; }
   .scroll { max-height:60vh; overflow:auto; }
+  .text-brand { color:var(--brand); }
+  .bg-brand { background:var(--brand); }
+  .border-brand { border-color:var(--brand) !important; }
+  .tab-btn:hover { color:var(--brand); }
+  a.brand-link { color:var(--brand); text-decoration:underline; }
+  .rev-input:focus, .adm-input:focus, #visionKey:focus { border-color:var(--brand); }
 </style>
+<link rel="icon" type="image/png" href="vip back logo.png" />
 </head>
 <body class="min-h-screen">
 
 <header class="border-b border-slate-200 bg-white">
   <div class="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between">
-    <span class="font-bold text-lg text-indigo-800">📋 Manpower OCR</span>
+    <span class="flex items-center gap-3">
+      <img src="vip back logo.png" alt="VIP" class="h-8 w-auto" />
+      <span class="font-bold text-lg text-slate-800">Manpower Report</span>
+    </span>
     <nav class="flex gap-4 text-sm">
-      <button data-tab="app" class="tab-btn hover:text-indigo-700 font-medium">App</button>
-      <button data-tab="admin" class="tab-btn hover:text-indigo-700 text-slate-500">Admin / Mapping</button>
+      <button data-tab="app" class="tab-btn font-medium">App</button>
+      <button data-tab="admin" class="tab-btn text-slate-500">Admin / Mapping</button>
     </nav>
   </div>
 </header>
@@ -79,7 +90,7 @@
       <div class="card p-4 mt-4 flex items-center gap-3 flex-wrap">
         <div class="grow min-w-[220px]">
           <p class="font-medium text-sm">🤖 AI key <span class="text-slate-400 font-normal">— optional</span></p>
-          <p class="text-xs text-slate-400">Leave empty to use the built-in <b>free AI</b> (a one-time free sign-in window appears on first extract). Or paste your own key: <a href="https://aistudio.google.com/apikey" target="_blank" class="text-indigo-700 underline">free Gemini key</a> (AIza…), Claude (sk-ant-…) or OpenAI (sk-…). Keys stay in this browser only.</p>
+          <p class="text-xs text-slate-400">Leave empty to use the built-in <b>free AI</b> (a one-time free sign-in window appears on first extract). Or paste your own key: <a href="https://aistudio.google.com/apikey" target="_blank" class="brand-link">free Gemini key</a> (AIza…), Claude (sk-ant-…) or OpenAI (sk-…). Keys stay in this browser only.</p>
         </div>
         <input id="visionKey" type="password" placeholder="AIza… / sk-ant-… / sk-…" class="text-sm border border-slate-300 rounded-lg px-2 py-1 w-56" />
         <button id="saveKey" class="btn btn-ghost text-sm">Save key</button>
@@ -90,7 +101,7 @@
 
       <div id="progressWrap" class="mt-6 hidden">
         <div class="flex justify-between text-sm mb-1"><span id="progressLabel">Extracting…</span><span id="progressPct">0%</span></div>
-        <div class="h-2 bg-slate-200 rounded-full overflow-hidden"><div id="progressBar" class="h-full bg-indigo-700 transition-all" style="width:0%"></div></div>
+        <div class="h-2 bg-slate-200 rounded-full overflow-hidden"><div id="progressBar" class="h-full bg-brand transition-all" style="width:0%"></div></div>
       </div>
 
       <div class="mt-6">
@@ -657,7 +668,7 @@ function renderStepper(cur){
   $("stepper").innerHTML=steps.map((s,i)=>{
     const active=i<=cur;
     return `<li class="flex items-center gap-2">
-      <span class="flex h-7 w-7 items-center justify-center rounded-full font-semibold ${active?'bg-indigo-700 text-white':'bg-slate-200 text-slate-500'}">${i+1}</span>
+      <span class="flex h-7 w-7 items-center justify-center rounded-full font-semibold ${active?'bg-brand text-white':'bg-slate-200 text-slate-500'}">${i+1}</span>
       <span class="${active?'font-medium':'text-slate-400'}">${s}</span>
       ${i<2?'<span class="h-px w-8 bg-slate-300 ml-1"></span>':''}</li>`;
   }).join("");
@@ -722,9 +733,9 @@ async function handleImage(file){
 /* dropzone */
 const dz=$("dropzone");
 dz.addEventListener("click",()=>$("imageInput").click());
-dz.addEventListener("dragover",e=>{e.preventDefault();dz.classList.add("border-indigo-400");});
-dz.addEventListener("dragleave",()=>dz.classList.remove("border-indigo-400"));
-dz.addEventListener("drop",e=>{e.preventDefault();dz.classList.remove("border-indigo-400");if(e.dataTransfer.files[0])handleImage(e.dataTransfer.files[0]);});
+dz.addEventListener("dragover",e=>{e.preventDefault();dz.classList.add("border-brand");});
+dz.addEventListener("dragleave",()=>dz.classList.remove("border-brand"));
+dz.addEventListener("drop",e=>{e.preventDefault();dz.classList.remove("border-brand");if(e.dataTransfer.files[0])handleImage(e.dataTransfer.files[0]);});
 $("imageInput").addEventListener("change",e=>e.target.files[0]&&handleImage(e.target.files[0]));
 
 $("templateInput").addEventListener("change",async e=>{
@@ -812,7 +823,7 @@ function renderReview(){
             <td class="px-4 py-1.5">${f.rowLabel} <span class="text-slate-400">· ${f.column}</span></td>
             <td class="px-4 py-1.5 text-slate-400">${f.excelCell}</td>
             <td class="px-4 py-1.5 text-slate-500">${v.value||"—"}</td>
-            <td class="px-4 py-1.5"><input data-fid="${f.id}" value="${v.value||""}" inputmode="${f.numeric?'numeric':'text'}" class="rev-input w-24 rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500"/></td>
+            <td class="px-4 py-1.5"><input data-fid="${f.id}" value="${v.value||""}" inputmode="${f.numeric?'numeric':'text'}" class="rev-input w-24 rounded-md border border-slate-300 px-2 py-1 outline-none"/></td>
             <td class="px-4 py-1.5"><span class="rounded-full px-2 py-0.5 text-xs ${confClass(v.confidence)}">${v.confidence}%</span></td>
           </tr>`;}).join("")}</tbody>
       </table></div>
@@ -855,7 +866,7 @@ function renderAdmin(){
           <tr class="border-b last:border-0">
             <td class="px-4 py-1.5">${f.rowLabel}</td><td class="px-4 py-1.5 text-slate-500">${f.column}</td>
             <td class="px-4 py-1.5 ${detected?'text-green-600':'text-slate-400'}">${detected||f.excelCell+' (default)'}</td>
-            <td class="px-4 py-1.5"><input data-fid="${f.id}" placeholder="${detected||f.excelCell}" value="${ov[f.id]||""}" class="adm-input cell rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-indigo-500 uppercase"/></td>
+            <td class="px-4 py-1.5"><input data-fid="${f.id}" placeholder="${detected||f.excelCell}" value="${ov[f.id]||""}" class="adm-input cell rounded-md border border-slate-300 px-2 py-1 outline-none uppercase"/></td>
           </tr>`;}).join("")}</tbody>
       </table></div>
     </div>`).join("");
